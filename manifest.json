@@ -1,0 +1,26 @@
+{
+  "manifestVersion": 1,
+  "library": "modusops-templates",
+  "templates": {
+    "registerModusOpsFeeds": {
+      "description": "Bootstrap a per-run SecretStore vault, store the SystemToken, register MAR + internal feeds with CredentialInfo + -CredentialProvider None + priority; unregister PSGallery unless allowed.",
+      "platforms": ["azd"],
+      "assets": { "azd": "azd.registerModusOpsFeeds.yml" }
+    },
+    "installModusOpsModules": {
+      "description": "Credential-agnostic install of modusOps / business modules (no token param). Always() teardown wipes the vault and repositories.",
+      "platforms": ["azd"],
+      "assets": { "azd": "azd.installModusOpsModules.yml" }
+    },
+    "sendTeamsChannelMessage": {
+      "description": "Post a success/failure/warning/note card to a Microsoft Teams channel webhook.",
+      "platforms": ["azd"],
+      "assets": { "azd": "azd.sendTeamsChannelMessage.yml" }
+    },
+    "sendDiscordChannelMessage": {
+      "description": "Post a success/failure/warning/note embed to a Discord channel webhook.",
+      "platforms": ["azd"],
+      "assets": { "azd": "azd.sendDiscordChannelMessage.yml" }
+    }
+  }
+}

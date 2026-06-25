@@ -1,0 +1,7 @@
+# Deterministic bytes for vendored/released assets so the SHA256 in a consumer's
+# .modusops.lock is stable regardless of the checkout platform. Force LF everywhere.
+* text=auto eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
