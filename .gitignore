@@ -1,0 +1,4 @@
+# Release staging (produced by .github/workflows/release.yml)
+dist/
+notes.md
+report.md

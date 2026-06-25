@@ -1,0 +1,50 @@
+parameters:
+  - name: webhookUri
+    type: string
+  - name: type
+    type: string
+    default: 'Note'
+  - name: title
+    type: string
+  - name: message
+    type: string
+
+steps:
+  - task: PowerShell@2
+    displayName: 'Send Teams channel message'
+    inputs:
+      targetType: 'inline'
+      pwsh: true
+      script: |
+        $ErrorActionPreference = 'Stop'
+        $webhookUri = "${{ parameters.webhookUri }}"
+        $messageType = "${{ parameters.type }}"
+        $title = "${{ parameters.title }}"
+        $message = "${{ parameters.message }}"
+
+        if ([string]::IsNullOrWhiteSpace($webhookUri)) {
+            throw 'webhookUri parameter is required.'
+        }
+
+        $themeColor = switch ($messageType.ToLower()) {
+            'success' { '00FF00' }
+            'failure' { 'FF0000' }
+            'warning' { 'FFFF00' }
+            default { '0078D7' }
+        }
+
+        $card = @{
+            '@type' = 'MessageCard'
+            '@context' = 'https://schema.org/extensions'
+            themeColor = $themeColor
+            summary = $title
+            sections = @(
+                @{
+                    activityTitle = $title
+                    text = $message
+                }
+            )
+        }
+
+        $body = $card | ConvertTo-Json -Depth 10
+        Invoke-RestMethod -Uri $webhookUri -Method Post -ContentType 'application/json' -Body $body

@@ -1,0 +1,119 @@
+# Credential-agnostic installer — pairs with registerModusOpsFeeds.yml (same job).
+# Passes NO -Credential: per-repo CredentialInfo (set at registration) routes the build token to the
+# internal feeds only; MAR/PSGallery carry no binding, so the token can't reach them (DesignProposal §5).
+# The always() teardown wipes the SecretStore vault as well as the repositories.
+parameters:
+  # Modules to install: { name (req), version?, preRelease?, repository? }
+  #   repository = constrain resolution to a named feed (prevents silent fall-through to a public feed)
+  - name: modules
+    type: object
+    default: []
+  # Emit the always() teardown step (wipes the on-disk SecretStore). Set false on all-but-last when one
+  # job invokes this template more than once.
+  - name: teardownAfter
+    type: boolean
+    default: true
+
+steps:
+  - task: PowerShell@2
+    displayName: 'Install modusOps modules (vault)'
+    env:
+      MODULES_JSON: '${{ convertToJson(parameters.modules) }}'
+    inputs:
+      targetType: 'inline'
+      pwsh: true
+      script: |
+        $VerbosePreference = 'Continue'
+        $ErrorActionPreference = 'Stop'
+
+        #SecretManagement was installed by registerModusOpsFeeds in this same job; ensure it's
+        #loaded so Install-PSResource can resolve per-repo CredentialInfo from the vault.
+        Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction SilentlyContinue
+
+        $modules = ConvertFrom-Json -InputObject $env:MODULES_JSON
+        if(-not $modules){ throw 'No modules were passed.' }
+
+        #Build the install splat: version 'v' strip, semver parse, prerelease detection
+        function Get-MFInstallSplat {
+            param($module)
+            $splat = @{ Name = $module.Name; Scope = 'CurrentUser'; TrustRepository = $true }
+            if(-not [string]::IsNullOrWhiteSpace($module.Version)){
+                $verString = $module.Version
+                if($verString -like 'v*'){ $verString = $verString.Substring(1) }
+                $semver = try{ [semver]$verString }catch{ throw "Invalid version format: $verString" }
+                if($semver.PreReleaseLabel){ $splat.Prerelease = $true }
+                $splat.Version = $verString
+            }elseif($module.PreRelease){
+                $splat.Prerelease = $true
+            }
+            return $splat
+        }
+
+        #Resolved feed per requested module. PSResourceGet records the source repository in the
+        #installed module's metadata (PSGetModuleInfo.xml), which Get-InstalledPSResource reads back as
+        #.Repository — that's also what Update-PSResource uses to know where to pull updates from.
+        $resolved = [System.Collections.Generic.List[object]]::new()
+
+        foreach($module in $modules){
+            if([string]::IsNullOrWhiteSpace($module.Name)){ throw 'A module entry is missing a name.' }
+            $splat = Get-MFInstallSplat $module
+            #NO -Credential. CredentialInfo (set at registration) routes the token to internal feeds only.
+            #Optional: constrain to a named feed to avoid silent fall-through to a public feed.
+            if(-not [string]::IsNullOrWhiteSpace($module.repository)){
+                $splat.Repository = $module.repository
+            }
+            write-verbose "Installing $($module.Name)"
+            #Multiple repos are registered. When a module isn't present on a given feed, that feed
+            #returns 'Response returned status code package: Not Found' which, under -ErrorAction Stop,
+            #would abort the whole job even though a higher-priority feed has it. Suppress here and
+            #validate below that the module actually resolved.
+            $installErrors = $null
+            Install-PSResource @splat -ErrorAction SilentlyContinue -ErrorVariable installErrors
+            $installed = Get-InstalledPSResource -Name $module.Name -ErrorAction SilentlyContinue |
+                Sort-Object Version -Descending | Select-Object -First 1
+            if(-not $installed){
+                if($installErrors){ $installErrors | ForEach-Object { Write-Warning $_.ToString() } }
+                throw "Failed to install $($module.Name)"
+            }
+            $resolved.Add([pscustomobject]@{ Name = $installed.Name; Version = $installed.Version; Repository = $installed.Repository })
+        }
+
+        #Per-module resolution: what was requested + which feed it actually came from
+        write-verbose 'Requested modules resolved from:'
+        $resolved | Format-Table Name, Version, Repository -AutoSize
+
+        #Provenance / de-facto SBOM — what actually resolved, including transitive
+        write-verbose 'Installed module provenance:'
+        Get-InstalledPSResource | Select-Object Name, Version, Repository | Sort-Object Name | Format-Table
+
+  - ${{ if parameters.teardownAfter }}:
+    - task: PowerShell@2
+      displayName: 'Tear down modusOps vault & repositories'
+      condition: always()
+      inputs:
+        targetType: 'inline'
+        pwsh: true
+        script: |
+          $ErrorActionPreference = 'Continue'
+          #Best-effort: wipe the on-disk secret store + clean registrations. Runs even if install threw.
+          try{
+              Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction SilentlyContinue
+              foreach($v in (Get-SecretVault -ErrorAction SilentlyContinue)){
+                  foreach($s in (Get-SecretInfo -Vault $v.Name -ErrorAction SilentlyContinue)){
+                      Remove-Secret -Name $s.Name -Vault $v.Name -ErrorAction SilentlyContinue
+                  }
+                  Unregister-SecretVault -Name $v.Name -ErrorAction SilentlyContinue
+              }
+              #Mirror the registration config so the reset doesn't re-init with Password/Prompt auth
+              #(which would prompt 'Enter password:' and fail under NonInteractive) — Roadmap fix.
+              Reset-SecretStore -Authentication None -Interaction None -Force -Confirm:$false -ErrorAction SilentlyContinue
+          }catch{
+              Write-Warning "Vault teardown best-effort failure: $_"
+          }
+          try{
+              foreach($r in (Get-PSResourceRepository -ErrorAction SilentlyContinue)){
+                  Unregister-PSResourceRepository -Name $r.Name -ErrorAction SilentlyContinue
+              }
+          }catch{
+              Write-Warning "Repository teardown best-effort failure: $_"
+          }

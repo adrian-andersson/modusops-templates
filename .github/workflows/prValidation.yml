@@ -1,0 +1,112 @@
+# PR validation for modusops-templates.
+# Lints every distributed template for STRUCTURE (must parse as YAML, no tab indentation) and SPACING
+# (trailing whitespace), posts a ModuleForge-style summary comment to the PR, and FAILS on structure
+# errors so a required status check blocks the merge. Spacing is advisory.
+# Only templates/ is linted — the workflow YAML under .github/ is not a distributed template.
+name: PR validation
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  yaml-structure-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          Install-Module -Name 'powershell-yaml' -Force -SkipPublisherCheck -Scope CurrentUser
+          Import-Module powershell-yaml
+          Get-Module powershell-yaml | Select-Object Name, Version | Format-Table
+
+      - name: Run YAML structure & spacing review
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          $VerbosePreference = 'Continue'
+          Import-Module powershell-yaml
+
+          $yamlFiles = @(Get-ChildItem -Path './templates' -Recurse -Include '*.yml','*.yaml' -ErrorAction SilentlyContinue)
+          $fileCount = $yamlFiles.Count
+          Write-Verbose "Found $fileCount YAML files"
+
+          $flagged = [System.Collections.Generic.List[object]]::new()
+          foreach($file in $yamlFiles){
+              $raw = Get-Content -LiteralPath $file.FullName -Raw
+              $lines = @(Get-Content -LiteralPath $file.FullName)
+              $structure = [System.Collections.Generic.List[string]]::new()
+              $spacing = [System.Collections.Generic.List[string]]::new()
+
+              try{ $null = ConvertFrom-Yaml $raw }catch{ $structure.Add("Does not parse: $($_.Exception.Message)") }
+
+              for($i = 0; $i -lt $lines.Count; $i++){
+                  if($lines[$i] -match '^\s*\t'){ $structure.Add("Tab indentation on line $($i+1)") }
+                  if($lines[$i] -match ' +$'){ $spacing.Add("Trailing whitespace on line $($i+1)") }
+              }
+
+              if($structure.Count -or $spacing.Count){
+                  $flagged.Add([PSCustomObject]@{
+                      FileName  = $file.Name
+                      Structure = $structure.Count
+                      Spacing   = $spacing.Count
+                      Counter   = "Struct:$($structure.Count) Space:$($spacing.Count)"
+                      Weight    = [int](($structure.Count * 50) + ($spacing.Count * 5))
+                      Detail    = (@($structure) + @($spacing)) -join '; '
+                  })
+              }
+          }
+
+          $structureTotal = [int](($flagged | Measure-Object -Property Structure -Sum).Sum)
+          $spacingTotal = [int](($flagged | Measure-Object -Property Spacing -Sum).Sum)
+          Write-Verbose "Structure issues: $structureTotal | Spacing issues: $spacingTotal"
+
+          $flaggedSelect = if($flagged){ $flagged | Sort-Object -Property Weight -Descending | Select-Object -First 10 }else{ $null }
+          $flaggedMarkdown = if($flaggedSelect){@(
+              '### Flagged files'
+              ''
+              '| Filename | Counters | Detail |'
+              '| --- | --- | --- |'
+              $($flaggedSelect.ForEach{ "| $($_.FileName) | $($_.Counter) | $($_.Detail) |" })
+              ''
+          ) -join "`n"}else{ $null }
+
+          $headline = if($structureTotal -gt 0){ '_Structure errors block this PR. Spacing issues are advisory._' }else{ '_Structure is clean. Any spacing issues below are advisory._' }
+
+          $report = @(
+              '### YAML Structure & Spacing Review'
+              ''
+              $headline
+              ''
+              "- **YAML files checked:** $fileCount"
+              "- **Structure issues:** $structureTotal $(if($structureTotal -gt 0){'❌'}else{'✅'})"
+              "- **Spacing issues:** $spacingTotal $(if($spacingTotal -gt 0){'⚠️'}else{'✅'})"
+              ''
+              "$flaggedMarkdown"
+              '_Notes:_'
+              ''
+              '- _Up to 10 flagged files shown, weighted (Structure:50 Spacing:5)._'
+              '- _Structure = must parse as YAML and must not use tab indentation._'
+              '- _Spacing = trailing whitespace. See the workflow log for exact lines._'
+              ''
+              '_Generated automatically by PR validation._'
+          ) -join "`n"
+
+          $report | Out-File -FilePath report.md -Encoding utf8
+          if($env:PR_NUMBER){
+              gh pr comment $env:PR_NUMBER --body-file report.md --repo $env:GITHUB_REPOSITORY
+          }
+
+          # Gate: structure errors fail the job so a required status check blocks the merge
+          if($structureTotal -gt 0){
+              throw "YAML structure validation failed: $structureTotal structure issue(s)."
+          }
