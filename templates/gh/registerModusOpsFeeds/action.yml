@@ -1,0 +1,154 @@
+name: 'Register modusOps feeds (vault)'
+description: >-
+  Registers MAR + internal GitHub Packages feeds using the VAULT credential model: a per-run
+  SecretStore vault is bound to each feed via CredentialInfo (+ -CredentialProvider None), so the
+  install action needs NO -Credential. Runs as a COMPOSITE action so the vault it builds survives
+  into installModusOpsModules in the SAME job. Pairs with installModusOpsModules.
+inputs:
+  feeds:
+    description: >-
+      JSON array of feed descriptors: [{ name (req), uri (req), priority?, credentialVar? }].
+      GitHub Packages uri = https://nuget.pkg.github.com/OWNER/index.json. credentialVar = NAME of an
+      env var holding this feed's OWN key (vendor / cross-owner feeds); when omitted, an internal feed
+      binds to the shared SystemToken.
+    required: true
+  allowPSGallery:
+    description: 'Leave PSGallery registered after the SecretManagement bootstrap.'
+    required: false
+    default: 'false'
+  token:
+    description: >-
+      Token authenticating to the internal feed(s). Pass the workflow GITHUB_TOKEN (same-owner reads)
+      or a read:packages PAT (cross-owner / private). Never hardcode a literal here.
+    required: true
+  username:
+    description: 'Username paired with the token for GitHub Packages basic auth. Defaults to github.actor.'
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    # --- 1. Ensure PSResourceGet is present (installed from PSGallery via PowerShellGet) ---
+    - name: Ensure PSResourceGet
+      shell: pwsh
+      run: |
+        $VerbosePreference = 'Continue'
+        $ErrorActionPreference = 'Stop'
+        if(-not (Get-Module -ListAvailable -Name 'Microsoft.PowerShell.PSResourceGet')){
+            Write-Verbose 'PSResourceGet not found; installing from PSGallery'
+            Install-Module -Name 'Microsoft.PowerShell.PSResourceGet' -Force -SkipPublisherCheck -Scope CurrentUser
+        }
+        Import-Module 'Microsoft.PowerShell.PSResourceGet'
+        Get-Module 'Microsoft.PowerShell.PSResourceGet' | Select-Object Name, Version | Format-Table
+
+    # --- 2. Register MAR + vault + feeds (CredentialInfo) ---
+    - name: Register modusOps feeds (vault + CredentialInfo)
+      shell: pwsh
+      env:
+        # Tokens/objects arrive via inputs; the secrets context is never referenced inside this manifest
+        # (it is evaluated even in run:/description: text). The caller passes secrets into the token input.
+        FEEDS_JSON: ${{ inputs.feeds }}
+        ALLOW_PSGALLERY: ${{ inputs.allowPSGallery }}
+        FEED_TOKEN: ${{ inputs.token }}
+        FEED_USERNAME: ${{ inputs.username || github.actor }}
+        RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        $VerbosePreference = 'Continue'
+        $ErrorActionPreference = 'Stop'
+
+        $feeds = ConvertFrom-Json -InputObject $env:FEEDS_JSON
+        if(-not $feeds){ throw 'No feeds were passed.' }
+        $allowPSGallery = $env:ALLOW_PSGALLERY -eq 'true'
+        $token    = $env:FEED_TOKEN
+        $username = if([string]::IsNullOrWhiteSpace($env:FEED_USERNAME)){ 'modusops' }else{ $env:FEED_USERNAME }
+
+        #Per-run vault so concurrent jobs on a shared agent don't collide
+        $vaultName = "ModusOpsVault-$($env:RUN_KEY)"
+
+        #--- Register MAR with priority OVER PSGallery (lower number wins; PSGallery default = 50) ---
+        if(-not (Get-PSResourceRepository -Name 'MAR' -ErrorAction SilentlyContinue)){
+            Write-Verbose 'Registering MAR (priority 40, beats PSGallery 50)'
+            Register-PSResourceRepository -Name 'MAR' -Uri 'https://mcr.microsoft.com' -ApiVersion ContainerRegistry -Trusted -Priority 40
+        }
+
+        #--- Install SecretManagement + SecretStore (PSGallery still registered as the source) ---
+        foreach($m in @('Microsoft.PowerShell.SecretManagement','Microsoft.PowerShell.SecretStore')){
+            if(-not (Get-InstalledPSResource -Name $m -ErrorAction SilentlyContinue)){
+                Write-Verbose "Installing $m"
+                #MAR is registered (priority 40) and will return 'Not Found' for these PSGallery
+                #modules; under -ErrorAction Stop that aborts the job. Suppress and validate instead.
+                $secMgmtErrors = $null
+                Install-PSResource -Name $m -Scope CurrentUser -TrustRepository -ErrorAction SilentlyContinue -ErrorVariable secMgmtErrors
+                if(-not (Get-InstalledPSResource -Name $m -ErrorAction SilentlyContinue)){
+                    if($secMgmtErrors){ $secMgmtErrors | ForEach-Object { Write-Warning $_.ToString() } }
+                    throw "Failed to install $m"
+                }
+            }
+        }
+        Import-Module Microsoft.PowerShell.SecretManagement, Microsoft.PowerShell.SecretStore
+
+        #--- Force a password-less store config BEFORE any secret op. The store initialises on first use
+        #--- with the DEFAULT config (Authentication=Password, Interaction=Prompt); a later
+        #--- Set-SecretStoreConfiguration then has to UNLOCK it to change auth, which prompts
+        #--- 'Enter password:' and dies under NonInteractive mode. Reset-SecretStore re-initialises from
+        #--- scratch with Authentication=None, so no existing password is required.
+        Reset-SecretStore -Scope CurrentUser -Authentication None -Interaction None -Force -Confirm:$false
+
+        #--- Register the vault (store is now password-less, so no prompt) ---
+        if(-not (Get-SecretVault -Name $vaultName -ErrorAction SilentlyContinue)){
+            Register-SecretVault -Name $vaultName -ModuleName Microsoft.PowerShell.SecretStore -DefaultVault
+        }
+
+        #--- Store the token as a PSCredential secret (GitHub Packages: username = actor, password = token) ---
+        if([string]::IsNullOrWhiteSpace($token)){ throw 'token input is empty. Pass the token input (GITHUB_TOKEN or a read:packages PAT).' }
+        $systemCred = [PSCredential]::new($username, (ConvertTo-SecureString $token -AsPlainText -Force))
+        Set-Secret -Name 'SystemToken' -Secret $systemCred -Vault $vaultName
+
+        #--- Register each internal feed with a CredentialInfo binding ---
+        $priority = 10
+        foreach($feed in $feeds){
+            if([string]::IsNullOrWhiteSpace($feed.name)){ throw 'A feed entry is missing a name.' }
+            #Defensive: MAR / PSGallery are handled above, never credential-bound
+            if($feed.name -in 'MAR','PSGallery'){ continue }
+
+            #On GitHub the feed URI is explicit (GitHub Packages endpoint) - no org/project derivation
+            if([string]::IsNullOrWhiteSpace($feed.uri)){
+                throw "Feed '$($feed.name)' needs an explicit 'uri' (GitHub Packages: https://nuget.pkg.github.com/OWNER/index.json)."
+            }
+            $repoUrl = $feed.uri
+
+            #Pick the secret this feed binds to:
+            #  own credential (credentialVar, for vendor/cross-owner feeds) -> a per-feed secret
+            #  otherwise the shared SystemToken
+            $secretName = 'SystemToken'
+            if(-not [string]::IsNullOrWhiteSpace($feed.credentialVar)){
+                $key = [Environment]::GetEnvironmentVariable($feed.credentialVar)
+                if([string]::IsNullOrWhiteSpace($key)){ throw "Feed '$($feed.name)' set credentialVar '$($feed.credentialVar)' but that env var is empty." }
+                $vendorCred = [PSCredential]::new($username, (ConvertTo-SecureString $key -AsPlainText -Force))
+                Set-Secret -Name $feed.name -Secret $vendorCred -Vault $vaultName
+                $secretName = $feed.name
+            }
+
+            #NOTE: verify the PSCredentialInfo type against the installed PSResourceGet version.
+            $credInfo = [Microsoft.PowerShell.PSResourceGet.UtilClasses.PSCredentialInfo]::new($vaultName, $secretName)
+            $feedPriority = if($null -ne $feed.priority -and "$($feed.priority)" -ne ''){ [int]$feed.priority }else{ $priority }
+
+            if(Get-PSResourceRepository -Name $feed.name -ErrorAction SilentlyContinue){
+                Unregister-PSResourceRepository -Name $feed.name
+            }
+            Write-Verbose "Registering feed '$($feed.name)' (priority $feedPriority, secret '$secretName')"
+            #-CredentialProvider None disables the auto-engaged AzArtifacts provider, so resolution falls
+            # through to CredentialInfo - the binding that routes the token to internal feeds only.
+            Register-PSResourceRepository -Name $feed.name -Uri $repoUrl -Trusted -Priority $feedPriority -CredentialProvider None -CredentialInfo $credInfo
+            $priority++
+        }
+
+        #--- Unregister PSGallery LAST unless allowed (SecretManagement bootstrap is done) ---
+        if(-not $allowPSGallery){
+            if(Get-PSResourceRepository -Name 'PSGallery' -ErrorAction SilentlyContinue){
+                Write-Verbose 'PSGallery not allowed (allowPSGallery=false); unregistering it'
+                Unregister-PSResourceRepository -Name 'PSGallery'
+            }
+        }
+
+        Get-PSResourceRepository | Format-Table Name, Priority, Uri

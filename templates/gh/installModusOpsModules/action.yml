@@ -1,0 +1,216 @@
+name: 'Install modusOps modules (vault)'
+description: >-
+  Credential-agnostic module install. Per-repo CredentialInfo (set by registerModusOpsFeeds in the
+  SAME job) routes the token to internal feeds only, so this passes NO -Credential. Inlines the
+  GitHub Packages folder-casing fix so it carries no runtime module dependency. The always() teardown
+  wipes the SecretStore vault + repositories. Pairs with registerModusOpsFeeds.
+inputs:
+  modules:
+    description: >-
+      JSON array of module descriptors: [{ name (req), version?, preRelease?, repository? }].
+      repository constrains resolution to a named feed (prevents silent fall-through to a public feed).
+    required: true
+  teardownAfter:
+    description: >-
+      Run the always() teardown that wipes the on-disk SecretStore + registrations. Set 'false' on
+      all-but-last when one job invokes this action more than once.
+    required: false
+    default: 'true'
+runs:
+  using: composite
+  steps:
+    - name: Install modusOps modules (vault)
+      shell: pwsh
+      env:
+        MODULES_JSON: ${{ inputs.modules }}
+      run: |
+        $VerbosePreference = 'Continue'
+        $ErrorActionPreference = 'Stop'
+
+        #SecretManagement was installed by registerModusOpsFeeds in this same job; ensure it's
+        #loaded so Install-PSResource can resolve per-repo CredentialInfo from the vault.
+        Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction SilentlyContinue
+
+        $modules = ConvertFrom-Json -InputObject $env:MODULES_JSON
+        if(-not $modules){ throw 'No modules were passed.' }
+
+        #Build the install splat: version 'v' strip, semver parse, prerelease detection
+        function Get-MFInstallSplat {
+            param($module)
+            $splat = @{ Name = $module.Name; Scope = 'CurrentUser'; TrustRepository = $true }
+            if(-not [string]::IsNullOrWhiteSpace($module.Version)){
+                $verString = $module.Version
+                if($verString -like 'v*'){ $verString = $verString.Substring(1) }
+                $semver = try{ [semver]$verString }catch{ throw "Invalid version format: $verString" }
+                if($semver.PreReleaseLabel){ $splat.Prerelease = $true }
+                $splat.Version = $verString
+            }elseif($module.PreRelease){
+                $splat.Prerelease = $true
+            }
+            return $splat
+        }
+
+        #--- Inlined case-sensitivity fix (no external dependency) ----------------------------------
+        # GitHub Packages can install a module into a folder whose casing differs from its .psd1
+        # manifest basename; on case-sensitive Linux runners that breaks discovery / Import-Module.
+        # This is Resolve-MFModuleCase from ModuleForge, inlined so the template carries its own fix.
+        function Resolve-MFModuleCase
+        {
+            [CmdletBinding()]
+            [OutputType([PSCustomObject])]
+            PARAM(
+                [Parameter(Mandatory,ValueFromPipeline,ValueFromPipelineByPropertyName)]
+                [string]$ModuleName,
+                [Parameter()]
+                [string[]]$ModuleFolder
+            )
+            begin{
+                $folderVersionSelect = @(
+                    'FullName'
+                    'Name'
+                    @{
+                        Name = 'Semver'
+                        Expression = {
+                            try { [semver]"$($_.Name)" }catch { $null }
+                        }
+                    }
+                )
+            }
+            process{
+                $moduleCandidates = [System.Collections.Generic.List[string]]::new()
+                if($ModuleFolder)
+                {
+                    Write-Verbose "Checking defined folder: $ModuleFolder"
+                    $foundItems = Get-ChildItem -Path $ModuleFolder -Recurse -Filter $ModuleName -Directory
+                    $foundItems.foreach{ $moduleCandidates.Add($_.FullName) }
+                }else{
+                    $locations = $env:PSModulePath -split [IO.Path]::PathSeparator
+                    $locations.Foreach{
+                        try{
+                            $foundItems = Get-ChildItem -Path $_ -Recurse -Filter $ModuleName -Directory -ErrorAction Ignore
+                            $foundItems.foreach{ $moduleCandidates.Add($_.FullName) }
+                        }catch{
+                            Write-Warning "Skipping path $_ due to read or permission errors"
+                        }
+                    }
+                }
+                $moduleCandidates = $moduleCandidates.ToArray()
+                Write-Verbose "Found $($moduleCandidates.count) locations."
+                if(!$moduleCandidates -or $moduleCandidates.Count -lt 1)
+                {
+                    Write-Warning "No module folders found for module: $ModuleName"
+                }
+                $moduleCandidates.forEach{
+                    $moduleFolderBasename = $(Get-Item $_).BaseName
+                    Remove-Variable latestVersion,modManifest,BaseFolderRefresh -ErrorAction Ignore
+                    Write-Verbose "Checking folder $_ for latest module version"
+                    $latestVersion = $(Get-ChildItem -path $_|Select-Object $folderVersionSelect).where{$_.Semver}|Sort-Object -Property Semver -Descending|Select-Object -First 1
+                    if($latestVersion)
+                    {
+                        Write-Verbose "Found latest version of: $($latestVersion.Name)"
+                        $modManifest = $(Get-ChildItem -Path $latestVersion.FullName).where{$_.name -eq "$ModuleName.psd1"}|Select-Object -first 1
+                        Write-Verbose "Found Manifest name with: $($modManifest.basename)"
+                        If($(Get-Item $_).BaseName -cne $modManifest.basename)
+                        {
+                            Write-Warning "Case mismatch between module folder $moduleFolderBasename and $($modManifest.basename)"
+                            Write-Verbose "Attempt to rename folder to manifest basename to correct for casing"
+                            try{
+                                Rename-Item -path $_ -NewName $modManifest.BaseName -Force -Erroraction Stop
+                                Start-Sleep -Seconds 4
+                                Write-Verbose 'Folder Rename attempted'
+                            }catch{
+                                Write-Warning 'Error renaming folder'
+                            }
+                            $Parent = Split-Path $_ -Parent
+                            $NewFullPath = Join-Path $Parent $modManifest.BaseName
+                            try{ $BaseFolderRefresh = Get-Item $NewFullPath }catch{ $BaseFolderRefresh = Get-Item $_ }
+                            [PSCustomObject]@{
+                                FolderFullName = $BaseFolderRefresh.FullName
+                                FolderBaseName = $BaseFolderRefresh.BaseName
+                                ManifestName = $modManifest.BaseName
+                                RenameAttempt = $true
+                                ManifestAndFolderMatch = if($BaseFolderRefresh.BaseName -ceq $modManifest.BaseName){$true}else{$false}
+                            }
+                        }else{
+                            Write-Verbose "Case match between module folder $moduleFolderBasename and $($modManifest.basename) - All Ok"
+                            [PSCustomObject]@{
+                                FolderFullName = $_
+                                FolderBaseName = $moduleFolderBasename
+                                ManifestName = $modManifest.BaseName
+                                RenameAttempt = $false
+                                ManifestAndFolderMatch = if($moduleFolderBasename -ceq $modManifest.BaseName){$true}else{$false}
+                            }
+                        }
+                        Write-Verbose "Finished checking folder $_"
+                    }else{
+                        Write-Warning "No module versions found for $ModuleName in folder $_"
+                    }
+                }
+            }
+        }
+        #-------------------------------------------------------------------------------------------
+
+        #Resolved feed per requested module. PSResourceGet records the source repository in the
+        #installed module's metadata (PSGetModuleInfo.xml), read back by Get-InstalledPSResource as
+        #.Repository - that's also what Update-PSResource uses to know where to pull updates from.
+        $resolved = [System.Collections.Generic.List[object]]::new()
+
+        foreach($module in $modules){
+            if([string]::IsNullOrWhiteSpace($module.Name)){ throw 'A module entry is missing a name.' }
+            $splat = Get-MFInstallSplat $module
+            #NO -Credential. CredentialInfo (set at registration) routes the token to internal feeds only.
+            #Optional: constrain to a named feed to avoid silent fall-through to a public feed.
+            if(-not [string]::IsNullOrWhiteSpace($module.repository)){
+                $splat.Repository = $module.repository
+            }
+            Write-Verbose "Installing $($module.Name)"
+            #When a module isn't present on a given feed it returns 'Not Found' which, under -ErrorAction
+            #Stop, would abort the job even though a higher-priority feed has it. Suppress + validate.
+            $installErrors = $null
+            Install-PSResource @splat -ErrorAction SilentlyContinue -ErrorVariable installErrors
+            $installed = Get-InstalledPSResource -Name $module.Name -ErrorAction SilentlyContinue |
+                Sort-Object Version -Descending | Select-Object -First 1
+            if(-not $installed){
+                if($installErrors){ $installErrors | ForEach-Object { Write-Warning $_.ToString() } }
+                throw "Failed to install $($module.Name)"
+            }
+            #Correct any GitHub Packages folder/manifest case mismatch so the module stays discoverable.
+            Resolve-MFModuleCase -ModuleName $installed.Name | Out-Null
+            $resolved.Add([pscustomobject]@{ Name = $installed.Name; Version = $installed.Version; Repository = $installed.Repository })
+        }
+
+        #Per-module resolution: what was requested + which feed it actually came from
+        Write-Verbose 'Requested modules resolved from:'
+        $resolved | Format-Table Name, Version, Repository -AutoSize
+
+        #Provenance / de-facto SBOM - what actually resolved, including transitive
+        Write-Verbose 'Installed module provenance:'
+        Get-InstalledPSResource | Select-Object Name, Version, Repository | Sort-Object Name | Format-Table
+
+    - name: Tear down modusOps vault & repositories
+      if: ${{ always() && inputs.teardownAfter == 'true' }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Continue'
+        #Best-effort: wipe the on-disk secret store + clean registrations. Runs even if install threw.
+        try{
+            Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction SilentlyContinue
+            foreach($v in (Get-SecretVault -ErrorAction SilentlyContinue)){
+                foreach($s in (Get-SecretInfo -Vault $v.Name -ErrorAction SilentlyContinue)){
+                    Remove-Secret -Name $s.Name -Vault $v.Name -ErrorAction SilentlyContinue
+                }
+                Unregister-SecretVault -Name $v.Name -ErrorAction SilentlyContinue
+            }
+            #Mirror the registration config so the reset doesn't re-init with Password/Prompt auth
+            #(which would prompt 'Enter password:' and fail under NonInteractive).
+            Reset-SecretStore -Authentication None -Interaction None -Force -Confirm:$false -ErrorAction SilentlyContinue
+        }catch{
+            Write-Warning "Vault teardown best-effort failure: $_"
+        }
+        try{
+            foreach($r in (Get-PSResourceRepository -ErrorAction SilentlyContinue)){
+                Unregister-PSResourceRepository -Name $r.Name -ErrorAction SilentlyContinue
+            }
+        }catch{
+            Write-Warning "Repository teardown best-effort failure: $_"
+        }

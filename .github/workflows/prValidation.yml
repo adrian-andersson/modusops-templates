@@ -1,12 +1,15 @@
 # PR validation for modusops-templates.
-# Lints every distributed template for:
+# Lints every distributed template (azd `parameters:` includes AND gh composite-action manifests) for:
 #   STRUCTURE (gates merge)  - must parse as YAML, no tab indentation
-#   PARAMETERS (gates merge) - default not in values, undeclared parameters.X reference,
+#   PARAMETERS (gates merge) - [azd] default not in values, undeclared parameters.X reference,
 #                              missing parameter name, duplicate parameter names
+#   GH ACTION (gates merge)  - [gh] literal ${{ secrets.* }} anywhere in the manifest (it is evaluated
+#                              even inside description:/run: text and breaks before any step runs),
+#                              runs.using not 'composite', undeclared inputs.X reference
 #   SECRETS (gates merge)    - known credential FORMATS (token prefixes, JWT, PEM, AccountKey=).
 #                              Format-based, not entropy-based, so GUIDs/SHAs are NOT flagged.
-#   PARAM HINTS (advisory)   - declared-but-unused parameter, parameter missing explicit type,
-#                              secret-named parameter with a hardcoded literal default
+#   PARAM HINTS (advisory)   - declared-but-unused parameter/input, parameter missing explicit type,
+#                              secret-named parameter with a hardcoded literal default, input missing description
 #   STYLE (advisory)         - duplicate displayName within a file
 #   SPACING (advisory)       - trailing whitespace
 # Posts a ModuleForge-style summary comment to the PR and FAILS on gating issues so a required
@@ -70,6 +73,7 @@ jobs:
 
               $structure  = [System.Collections.Generic.List[string]]::new()  # gates
               $paramError = [System.Collections.Generic.List[string]]::new()  # gates
+              $ghError    = [System.Collections.Generic.List[string]]::new()  # gates (gh composite actions)
               $secret     = [System.Collections.Generic.List[string]]::new()  # gates
               $paramWarn  = [System.Collections.Generic.List[string]]::new()  # advisory
               $style      = [System.Collections.Generic.List[string]]::new()  # advisory
@@ -150,30 +154,74 @@ jobs:
                   }
               }
 
-              if($structure.Count -or $paramError.Count -or $secret.Count -or $paramWarn.Count -or $style.Count -or $spacing.Count){
+              # --- GH ACTION: composite-action manifests (top-level `runs:` block) ---
+              if($doc -is [System.Collections.IDictionary] -and $doc.Contains('runs')){
+                  # GATE: literal ${{ secrets.* }} anywhere - evaluated even in description:/run: text, so it
+                  # breaks the action before any step runs. Tokens must arrive via inputs, not secrets context.
+                  for($i = 0; $i -lt $lines.Count; $i++){
+                      if($lines[$i] -match '\$\{\{\s*secrets\.'){ $ghError.Add("Literal `${{ secrets.* }}` on line $($i+1) - pass tokens via an input instead") }
+                  }
+
+                  # GATE: composite actions only (reusable-workflow / node actions are not the modusOps shape)
+                  $runs = $doc['runs']
+                  if($runs -is [System.Collections.IDictionary]){
+                      $using = "$($runs['using'])"
+                      if($using -ne 'composite'){ $ghError.Add("runs.using is '$using' - modusOps gh templates must be composite actions") }
+                  }
+
+                  # Declared inputs (map, not list) + advisory missing description
+                  $declaredInputs = [System.Collections.Generic.List[string]]::new()
+                  if($doc.Contains('inputs') -and $doc['inputs'] -is [System.Collections.IDictionary]){
+                      foreach($k in $doc['inputs'].Keys){
+                          $declaredInputs.Add([string]$k)
+                          $spec = $doc['inputs'][$k]
+                          if(-not ($spec -is [System.Collections.IDictionary]) -or -not $spec.Contains('description') -or [string]::IsNullOrWhiteSpace($spec['description'])){
+                              $paramWarn.Add("Input '$k' has no description")
+                          }
+                      }
+                  }
+
+                  # Referenced inputs: inputs.X and inputs['X'] / inputs["X"]
+                  $inRefDot = [regex]::Matches($raw, 'inputs\.([A-Za-z_][A-Za-z0-9_-]*)') | ForEach-Object { $_.Groups[1].Value }
+                  $inRefIdx = [regex]::Matches($raw, 'inputs\[[''"]([A-Za-z_][A-Za-z0-9_-]*)[''"]\]') | ForEach-Object { $_.Groups[1].Value }
+                  $inReferenced = @($inRefDot + $inRefIdx) | Select-Object -Unique
+
+                  # Declared but never referenced (advisory)
+                  foreach($d in $declaredInputs){
+                      if($inReferenced -notcontains $d){ $paramWarn.Add("Input '$d' is declared but never referenced") }
+                  }
+                  # Referenced but never declared (gates - typo / dead reference)
+                  foreach($r in $inReferenced){
+                      if($declaredInputs -notcontains $r){ $ghError.Add("Reference 'inputs.$r' has no matching declaration") }
+                  }
+              }
+
+              if($structure.Count -or $paramError.Count -or $ghError.Count -or $secret.Count -or $paramWarn.Count -or $style.Count -or $spacing.Count){
                   $flagged.Add([PSCustomObject]@{
-                      FileName   = $file.Name
+                      FileName   = ([IO.Path]::GetRelativePath($PWD.Path, $file.FullName) -replace '\\','/')
                       Structure  = $structure.Count
                       ParamError = $paramError.Count
+                      GhError    = $ghError.Count
                       Secret     = $secret.Count
                       ParamWarn  = $paramWarn.Count
                       Style      = $style.Count
                       Spacing    = $spacing.Count
-                      Counter    = "Struct:$($structure.Count) ParamErr:$($paramError.Count) Secret:$($secret.Count) ParamWarn:$($paramWarn.Count) Style:$($style.Count) Space:$($spacing.Count)"
-                      Weight     = [int](($structure.Count * 50) + ($paramError.Count * 50) + ($secret.Count * 100) + ($paramWarn.Count * 10) + ($style.Count * 8) + ($spacing.Count * 5))
-                      Detail     = (@($structure) + @($paramError) + @($secret) + @($paramWarn) + @($style) + @($spacing)) -join '; '
+                      Counter    = "Struct:$($structure.Count) ParamErr:$($paramError.Count) GhErr:$($ghError.Count) Secret:$($secret.Count) ParamWarn:$($paramWarn.Count) Style:$($style.Count) Space:$($spacing.Count)"
+                      Weight     = [int](($structure.Count * 50) + ($paramError.Count * 50) + ($ghError.Count * 50) + ($secret.Count * 100) + ($paramWarn.Count * 10) + ($style.Count * 8) + ($spacing.Count * 5))
+                      Detail     = (@($structure) + @($paramError) + @($ghError) + @($secret) + @($paramWarn) + @($style) + @($spacing)) -join '; '
                   })
               }
           }
 
           $structureTotal  = [int](($flagged | Measure-Object -Property Structure  -Sum).Sum)
           $paramErrorTotal = [int](($flagged | Measure-Object -Property ParamError -Sum).Sum)
+          $ghErrorTotal    = [int](($flagged | Measure-Object -Property GhError    -Sum).Sum)
           $secretTotal     = [int](($flagged | Measure-Object -Property Secret     -Sum).Sum)
           $paramWarnTotal  = [int](($flagged | Measure-Object -Property ParamWarn  -Sum).Sum)
           $styleTotal      = [int](($flagged | Measure-Object -Property Style      -Sum).Sum)
           $spacingTotal    = [int](($flagged | Measure-Object -Property Spacing    -Sum).Sum)
-          $gateTotal = $structureTotal + $paramErrorTotal + $secretTotal
-          Write-Verbose "Struct:$structureTotal ParamErr:$paramErrorTotal Secret:$secretTotal ParamWarn:$paramWarnTotal Style:$styleTotal Space:$spacingTotal"
+          $gateTotal = $structureTotal + $paramErrorTotal + $ghErrorTotal + $secretTotal
+          Write-Verbose "Struct:$structureTotal ParamErr:$paramErrorTotal GhErr:$ghErrorTotal Secret:$secretTotal ParamWarn:$paramWarnTotal Style:$styleTotal Space:$spacingTotal"
 
           $flaggedSelect = if($flagged){ $flagged | Sort-Object -Property Weight -Descending | Select-Object -First 10 }else{ $null }
           $flaggedMarkdown = if($flaggedSelect){@(
@@ -185,7 +233,7 @@ jobs:
               ''
           ) -join "`n"}else{ $null }
 
-          $headline = if($gateTotal -gt 0){ '_Structure / parameter / secret errors block this PR. Hints, style and spacing are advisory._' }else{ '_No blocking issues. Any items below are advisory._' }
+          $headline = if($gateTotal -gt 0){ '_Structure / parameter / gh-action / secret errors block this PR. Hints, style and spacing are advisory._' }else{ '_No blocking issues. Any items below are advisory._' }
 
           $report = @(
               '### Template Validation Review'
@@ -195,6 +243,7 @@ jobs:
               "- **YAML files checked:** $fileCount"
               "- **Structure issues:** $structureTotal $(if($structureTotal -gt 0){'❌'}else{'✅'})"
               "- **Parameter errors:** $paramErrorTotal $(if($paramErrorTotal -gt 0){'❌'}else{'✅'})"
+              "- **GH action errors:** $ghErrorTotal $(if($ghErrorTotal -gt 0){'❌'}else{'✅'})"
               "- **Secret findings:** $secretTotal $(if($secretTotal -gt 0){'❌'}else{'✅'})"
               "- **Parameter hints:** $paramWarnTotal $(if($paramWarnTotal -gt 0){'⚠️'}else{'✅'})"
               "- **Style hints:** $styleTotal $(if($styleTotal -gt 0){'⚠️'}else{'✅'})"
@@ -203,11 +252,12 @@ jobs:
               "$flaggedMarkdown"
               '_Notes:_'
               ''
-              '- _Up to 10 flagged files shown, weighted (Secret:100 Structure/ParamErr:50 ParamWarn:10 Style:8 Spacing:5)._'
+              '- _Up to 10 flagged files shown, weighted (Secret:100 Structure/ParamErr/GhErr:50 ParamWarn:10 Style:8 Spacing:5)._'
               '- _Structure = must parse as YAML and must not use tab indentation._'
               '- _Parameter errors = default not in values, undeclared `parameters.X` reference, missing/duplicate name._'
+              '- _GH action errors = literal `${{ secrets.* }}` in a composite manifest, `runs.using` not composite, undeclared `inputs.X` reference._'
               '- _Secret findings = a known credential format (token prefix, JWT, PEM, AccountKey=). Format-based, so GUIDs are not flagged._'
-              '- _Parameter hints = declared-but-unused, missing explicit type, or secret-named param with a literal default._'
+              '- _Parameter hints = declared-but-unused param/input, missing explicit type, secret-named param with a literal default, or input missing description._'
               '- _Style = duplicate displayName within a file. Spacing = trailing whitespace._'
               ''
               '_Generated automatically by PR validation._'
@@ -218,7 +268,7 @@ jobs:
               gh pr comment $env:PR_NUMBER --body-file report.md --repo $env:GITHUB_REPOSITORY
           }
 
-          # Gate: structure + parameter + secret errors fail the job so a required status check blocks merge
+          # Gate: structure + parameter + gh-action + secret errors fail the job so a required status check blocks merge
           if($gateTotal -gt 0){
-              throw "Template validation failed: $structureTotal structure + $paramErrorTotal parameter + $secretTotal secret finding(s)."
+              throw "Template validation failed: $structureTotal structure + $paramErrorTotal parameter + $ghErrorTotal gh-action + $secretTotal secret finding(s)."
           }
