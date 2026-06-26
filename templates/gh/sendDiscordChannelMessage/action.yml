@@ -1,0 +1,55 @@
+name: 'Send Discord channel message'
+description: 'Posts a coloured embed (success/failure/warning/note) to a Discord channel webhook.'
+inputs:
+  webhookUri:
+    description: 'Discord channel webhook URL. Pass via an input from secrets.* - never hardcode.'
+    required: true
+  type:
+    description: 'Success | Failure | Warning | Note (drives the embed colour).'
+    required: false
+    default: 'Note'
+  title:
+    description: 'Embed title.'
+    required: true
+  message:
+    description: 'Embed description.'
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Send Discord channel message
+      shell: pwsh
+      env:
+        WEBHOOK_URI: ${{ inputs.webhookUri }}
+        MESSAGE_TYPE: ${{ inputs.type }}
+        EMBED_TITLE: ${{ inputs.title }}
+        EMBED_MESSAGE: ${{ inputs.message }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $webhookUri  = $env:WEBHOOK_URI
+        $messageType = $env:MESSAGE_TYPE
+        $title       = $env:EMBED_TITLE
+        $message     = $env:EMBED_MESSAGE
+
+        if([string]::IsNullOrWhiteSpace($webhookUri)){ throw 'webhookUri input is required.' }
+
+        # Discord embed colours are decimal integers
+        $color = switch ($messageType.ToLower()) {
+            'success' { 65280 }      # 00FF00
+            'failure' { 16711680 }   # FF0000
+            'warning' { 16776960 }   # FFFF00
+            default   { 30935 }      # 0078D7
+        }
+
+        $payload = @{
+            embeds = @(
+                @{
+                    title       = $title
+                    description = $message
+                    color       = $color
+                }
+            )
+        }
+
+        $body = $payload | ConvertTo-Json -Depth 10
+        Invoke-RestMethod -Uri $webhookUri -Method Post -ContentType 'application/json' -Body $body

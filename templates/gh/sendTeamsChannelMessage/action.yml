@@ -1,0 +1,59 @@
+name: 'Send Teams channel message'
+description: >-
+  Posts a success/failure/warning/note MessageCard to a Microsoft Teams channel webhook. Ported from
+  the azd template; not yet exercised on a live Teams webhook (no test account) - flagged as untested.
+inputs:
+  webhookUri:
+    description: 'Teams channel incoming-webhook URL. Pass via an input from secrets.* - never hardcode.'
+    required: true
+  type:
+    description: 'Success | Failure | Warning | Note (drives the card theme colour).'
+    required: false
+    default: 'Note'
+  title:
+    description: 'Card title / summary.'
+    required: true
+  message:
+    description: 'Card body text.'
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Send Teams channel message
+      shell: pwsh
+      env:
+        WEBHOOK_URI: ${{ inputs.webhookUri }}
+        MESSAGE_TYPE: ${{ inputs.type }}
+        CARD_TITLE: ${{ inputs.title }}
+        CARD_MESSAGE: ${{ inputs.message }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $webhookUri  = $env:WEBHOOK_URI
+        $messageType = $env:MESSAGE_TYPE
+        $title       = $env:CARD_TITLE
+        $message     = $env:CARD_MESSAGE
+
+        if([string]::IsNullOrWhiteSpace($webhookUri)){ throw 'webhookUri input is required.' }
+
+        $themeColor = switch ($messageType.ToLower()) {
+            'success' { '00FF00' }
+            'failure' { 'FF0000' }
+            'warning' { 'FFFF00' }
+            default   { '0078D7' }
+        }
+
+        $card = @{
+            '@type'    = 'MessageCard'
+            '@context' = 'https://schema.org/extensions'
+            themeColor = $themeColor
+            summary    = $title
+            sections   = @(
+                @{
+                    activityTitle = $title
+                    text          = $message
+                }
+            )
+        }
+
+        $body = $card | ConvertTo-Json -Depth 10
+        Invoke-RestMethod -Uri $webhookUri -Method Post -ContentType 'application/json' -Body $body

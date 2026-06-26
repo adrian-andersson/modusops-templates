@@ -1,8 +1,16 @@
 # Release for modusops-templates.
-# On merge to main: compute the next SemVer tag, attach the FULL template set as release assets
-# (platform-prefixed: {platform}.{name}.yml) plus manifest.json, and write release notes that list
-# ONLY the templates that actually changed since the previous tag.
+# On merge to main: compute the next SemVer tag, attach the FULL template set as release assets, write
+# a checksums.txt, plus manifest.json, and write release notes that list ONLY the templates that
+# actually changed since the previous tag.
 # Patch auto-bumps on every merge; minor/major via a manual run (workflow_dispatch).
+#
+# Asset shape (per platform):
+#   azd  -> single file, asset name `azd.{name}.yml`        (integrity = file SHA256)
+#   gh   -> composite-action DIRECTORY zipped, `gh.{name}.zip` (integrity = CANONICAL TREE HASH, below)
+# The lockfile/Test-MOTemplate drift anchor for gh is the tree hash, NOT the zip's own SHA, because zip
+# archives are not byte-reproducible. checksums.txt records the anchor value per asset (file SHA256 for
+# .yml, tree hash for .zip) and is the reference implementation of the hashing the consumer tooling
+# replicates at Add/Test time.
 name: Release
 
 on:
@@ -66,16 +74,58 @@ jobs:
       - name: Stage release assets (full set, platform-prefixed)
         shell: pwsh
         run: |
+          $VerbosePreference = 'Continue'
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          $templates = @(Get-ChildItem -Path './templates' -Recurse -Include '*.yml','*.yaml')
-          if($templates.Count -eq 0){ throw 'No templates found under templates/.' }
-          foreach($t in $templates){
-              $platform = $t.Directory.Name
-              $asset = "$platform.$($t.Name)"
-              Copy-Item -LiteralPath $t.FullName -Destination (Join-Path 'dist' $asset)
+
+          # Canonical tree hash: sorted relative POSIX paths + per-file SHA256, themselves SHA256'd.
+          # This is the gh integrity anchor the consumer lockfile pins (NOT the zip's own SHA).
+          function Get-TreeHash {
+              param([string]$Root)
+              $files = Get-ChildItem -LiteralPath $Root -Recurse -File | Sort-Object {
+                  ([IO.Path]::GetRelativePath($Root, $_.FullName) -replace '\\','/')
+              }
+              $sb = [System.Text.StringBuilder]::new()
+              foreach($f in $files){
+                  $rel = ([IO.Path]::GetRelativePath($Root, $f.FullName) -replace '\\','/')
+                  $h = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash.ToLower()
+                  [void]$sb.Append("$rel`n$h`n")
+              }
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($sb.ToString())
+              $sha = [System.Security.Cryptography.SHA256]::Create()
+              return ([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-','').ToLower()
           }
+
+          $checksums = [System.Collections.Generic.List[string]]::new()
+
+          # --- azd: single-file templates -> azd.{name}.yml (anchor = file SHA256) ---
+          $azd = @(Get-ChildItem -Path './templates/azd' -File -Include '*.yml','*.yaml' -Recurse -ErrorAction SilentlyContinue)
+          foreach($t in $azd){
+              $asset = "azd.$($t.Name)"
+              Copy-Item -LiteralPath $t.FullName -Destination (Join-Path 'dist' $asset)
+              $hash = (Get-FileHash -LiteralPath $t.FullName -Algorithm SHA256).Hash.ToLower()
+              $checksums.Add("$hash  $asset")
+          }
+
+          # --- gh: composite-action directories -> gh.{name}.zip (anchor = canonical TREE hash) ---
+          $ghDirs = @(Get-ChildItem -Path './templates/gh' -Directory -ErrorAction SilentlyContinue)
+          foreach($d in $ghDirs){
+              if(-not (Test-Path (Join-Path $d.FullName 'action.yml'))){
+                  throw "gh template '$($d.Name)' has no action.yml - a composite action requires one."
+              }
+              $asset = "gh.$($d.Name).zip"
+              $zipPath = Join-Path 'dist' $asset
+              # Zip the directory CONTENTS so it expands straight into the vendored <name>/ folder.
+              Compress-Archive -Path (Join-Path $d.FullName '*') -DestinationPath $zipPath -Force
+              $tree = Get-TreeHash -Root $d.FullName
+              $checksums.Add("$tree  $asset")
+          }
+
+          if($azd.Count -eq 0 -and $ghDirs.Count -eq 0){ throw 'No templates found under templates/.' }
+
+          ($checksums | Sort-Object) -join "`n" | Out-File -FilePath 'dist/checksums.txt' -Encoding utf8 -NoNewline
           if(Test-Path './manifest.json'){ Copy-Item -LiteralPath './manifest.json' -Destination 'dist/manifest.json' }
           Get-ChildItem ./dist | Select-Object Name, Length | Format-Table
+          Write-Verbose "checksums.txt:`n$(Get-Content dist/checksums.txt -Raw)"
 
       - name: Build changed-only release notes
         shell: pwsh
