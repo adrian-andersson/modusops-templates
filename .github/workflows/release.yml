@@ -1,8 +1,12 @@
 # Release for modusops-templates.
-# On merge to main: compute the next SemVer tag, attach the FULL template set as release assets, write
-# a checksums.txt, plus manifest.json, and write release notes that list ONLY the templates that
-# actually changed since the previous tag.
-# Patch auto-bumps on every merge; minor/major via a manual run (workflow_dispatch).
+# On merge to main: compute the next ROLLING-INTEGER tag (v1, v2, v3, …), attach the FULL template set
+# as release assets, write a checksums.txt + manifest.json, and release notes listing ONLY the templates
+# that changed since the previous tag. `gh release create vN` cuts the tag and the release in one step
+# (no separate tag workflow — a GITHUB_TOKEN-pushed tag would not trigger one anyway).
+#
+# Versioning is single-integer (N+), NOT SemVer: the library is a curated SET, so one monotonic coordinate
+# is the compatibility pin recorded in the consumer `.modusops.lock`. The same vN tag is the immutable ref
+# for gh consumers who pin cross-repo (`uses: owner/modusops-templates/templates/gh/<name>@vN`).
 #
 # Asset shape (per platform):
 #   azd  -> single file, asset name `azd.{name}.yml`        (integrity = file SHA256)
@@ -17,12 +21,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      version_type:
-        description: 'Version increment'
-        type: choice
-        default: patch
-        options: [patch, minor, major]
 
 permissions:
   contents: write
@@ -40,36 +38,32 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compute next SemVer tag
+      - name: Compute next rolling-integer tag
         id: ver
         shell: pwsh
-        env:
-          VERSION_TYPE: ${{ github.event.inputs.version_type }}
         run: |
           $VerbosePreference = 'Continue'
-          $tags = @(git tag --list)
-          $versions = $tags | Where-Object { $_ -match '^v?\d+\.\d+\.\d+$' } | ForEach-Object { [version]($_.TrimStart('v')) }
+          $ErrorActionPreference = 'Stop'
 
-          if($versions){
-              $latest = $versions | Sort-Object -Descending | Select-Object -First 1
-              Write-Verbose "Latest tag: v$latest"
-              $type = if([string]::IsNullOrWhiteSpace($env:VERSION_TYPE)){ 'patch' }else{ $env:VERSION_TYPE }
-              switch($type){
-                  'major' { $next = [version]::new($latest.Major + 1, 0, 0) }
-                  'minor' { $next = [version]::new($latest.Major, $latest.Minor + 1, 0) }
-                  default { $next = [version]::new($latest.Major, $latest.Minor, $latest.Build + 1) }
-              }
-              $previous = "v$latest"
+          # Single-integer (N+) versioning: highest existing vN + 1; first release is v1. Tags are
+          # immutable - each release is a new integer. Old SemVer tags (vX.Y.Z) are ignored by the
+          # `^v(\d+)$` match, so the N+ sequence starts cleanly at v1. (cf. gh-poc-templates tag.yml)
+          $existing = @(git tag --list 'v*') | Where-Object { $_ -match '^v(\d+)$' } | ForEach-Object { [int]$Matches[1] }
+          if($existing){
+              $current  = ($existing | Measure-Object -Maximum).Maximum
+              $next     = $current + 1
+              $previous = "v$current"
           }else{
-              Write-Verbose 'No existing version tags; first release is v0.1.0'
-              $next = [version]'0.1.0'
+              Write-Verbose 'No existing vN tags; first release is v1'
+              $next     = 1
               $previous = ''
           }
 
-          $nextTag = "v$($next.Major).$($next.Minor).$($next.Build)"
+          $nextTag = "v$next"
+          Write-Verbose "Existing single-int tags: $($existing -join ', ')"
           Write-Verbose "Next tag: $nextTag (previous: '$previous')"
-          "tag=$nextTag"        | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "previous=$previous"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=$nextTag"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "previous=$previous" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Stage release assets (full set, platform-prefixed)
         shell: pwsh
@@ -120,7 +114,34 @@ jobs:
               $checksums.Add("$tree  $asset")
           }
 
-          if($azd.Count -eq 0 -and $ghDirs.Count -eq 0){ throw 'No templates found under templates/.' }
+          # --- repoScaffold: workflows / markdown / issue forms shipped from .github (dogfooded) ---
+          # Manifest-driven (not globbed): each repoScaffold entry names its own source path + asset name.
+          # File source -> single-file asset (anchor = file SHA256). Directory source -> zip (anchor = tree hash).
+          $repoScaffoldCount = 0
+          if(Test-Path './manifest.json'){
+              $mf = Get-Content -LiteralPath './manifest.json' -Raw | ConvertFrom-Json
+              foreach($prop in $mf.templates.PSObject.Properties){
+                  $t = $prop.Value
+                  if($t.category -ne 'repoScaffold'){ continue }
+                  $asset = $t.assets.gh
+                  $src   = $t.source.gh
+                  if(-not $asset -or -not $src){ throw "repoScaffold '$($prop.Name)' is missing a gh asset/source in the manifest." }
+                  if(-not (Test-Path -LiteralPath $src)){ throw "repoScaffold '$($prop.Name)' source '$src' does not exist." }
+                  if(Test-Path -LiteralPath $src -PathType Leaf){
+                      Copy-Item -LiteralPath $src -Destination (Join-Path 'dist' $asset)
+                      $hash = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash.ToLower()
+                      $checksums.Add("$hash  $asset")
+                  }else{
+                      Compress-Archive -Path (Join-Path $src '*') -DestinationPath (Join-Path 'dist' $asset) -Force
+                      $tree = Get-TreeHash -Root $src
+                      $checksums.Add("$tree  $asset")
+                  }
+                  Write-Verbose "Staged repoScaffold '$($prop.Name)' -> $asset (from $src)"
+                  $repoScaffoldCount++
+              }
+          }
+
+          if($azd.Count -eq 0 -and $ghDirs.Count -eq 0 -and $repoScaffoldCount -eq 0){ throw 'No templates found.' }
 
           ($checksums | Sort-Object) -join "`n" | Out-File -FilePath 'dist/checksums.txt' -Encoding utf8 -NoNewline
           if(Test-Path './manifest.json'){ Copy-Item -LiteralPath './manifest.json' -Destination 'dist/manifest.json' }
