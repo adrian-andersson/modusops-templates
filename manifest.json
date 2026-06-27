@@ -1,31 +1,81 @@
 {
-  "manifestVersion": 1,
+  "manifestVersion": 2,
   "library": "modusops-templates",
   "assetKinds": {
-    "_comment": "Asset extension signals the vendor shape: '.yml' = single file vendored as <name>.yml; '.zip' = composite-action directory vendored as <name>/ (expand on fetch). The lockfile drift anchor for '.zip' assets is a CANONICAL TREE HASH (sorted relative paths + per-file SHA256), not the zip's own SHA, since zip archives are not byte-reproducible.",
+    "_comment": "Asset extension signals the vendor shape: '.yml'/'.md' = single file vendored to its dest; '.zip' = a DIRECTORY vendored as a tree (expand on fetch). The lockfile drift anchor for '.zip' assets is a CANONICAL TREE HASH (sorted relative paths + per-file SHA256), not the zip's own SHA, since zip archives are not byte-reproducible.",
     ".yml": "file",
+    ".md": "file",
     ".zip": "dir"
+  },
+  "_categories": {
+    "_comment": "category = consumption intent. 'pipeline' = a building block composed INTO a pipeline (dest is consumer-chosen via the tooling's -Path). 'repoScaffold' = repo furniture STAMPED into a repo at a FIXED dest (source is dogfooded from this repo's own .github/).",
+    "pipeline": "compose into a pipeline",
+    "repoScaffold": "stamp into a repo at a fixed dest"
   },
   "templates": {
     "registerModusOpsFeeds": {
+      "category": "pipeline",
+      "kind": { "azd": "stepTemplate", "gh": "compositeAction" },
       "description": "Bootstrap a per-run SecretStore vault, store the SystemToken, register MAR + internal feeds with CredentialInfo + -CredentialProvider None + priority; unregister PSGallery unless allowed.",
       "platforms": ["azd", "gh"],
       "assets": { "azd": "azd.registerModusOpsFeeds.yml", "gh": "gh.registerModusOpsFeeds.zip" }
     },
     "installModusOpsModules": {
+      "category": "pipeline",
+      "kind": { "azd": "stepTemplate", "gh": "compositeAction" },
       "description": "Credential-agnostic install of modusOps / business modules (no token param). Always() teardown wipes the vault and repositories. The gh action inlines the GitHub Packages folder-casing fix.",
       "platforms": ["azd", "gh"],
       "assets": { "azd": "azd.installModusOpsModules.yml", "gh": "gh.installModusOpsModules.zip" }
     },
     "sendTeamsChannelMessage": {
+      "category": "pipeline",
+      "kind": { "azd": "stepTemplate", "gh": "compositeAction" },
       "description": "Post a success/failure/warning/note card to a Microsoft Teams channel webhook. (gh port untested on a live webhook.)",
       "platforms": ["azd", "gh"],
       "assets": { "azd": "azd.sendTeamsChannelMessage.yml", "gh": "gh.sendTeamsChannelMessage.zip" }
     },
     "sendDiscordChannelMessage": {
+      "category": "pipeline",
+      "kind": { "azd": "stepTemplate", "gh": "compositeAction" },
       "description": "Post a success/failure/warning/note embed to a Discord channel webhook.",
       "platforms": ["azd", "gh"],
       "assets": { "azd": "azd.sendDiscordChannelMessage.yml", "gh": "gh.sendDiscordChannelMessage.zip" }
+    },
+    "prValidation": {
+      "category": "repoScaffold",
+      "kind": { "gh": "workflow" },
+      "description": "PR-gate workflow: lints azd + gh templates (structure / parameter / gh-action / secret) and blocks merge on gating issues.",
+      "platforms": ["gh"],
+      "assets": { "gh": "gh.workflow.prValidation.yml" },
+      "source": { "gh": ".github/workflows/prValidation.yml" },
+      "dest": { "gh": ".github/workflows/prValidation.yml" }
+    },
+    "release": {
+      "category": "repoScaffold",
+      "kind": { "gh": "workflow" },
+      "description": "Release workflow: on merge to main cuts the next rolling-integer tag (vN) and attaches the full template set + checksums.txt + manifest.json.",
+      "platforms": ["gh"],
+      "assets": { "gh": "gh.workflow.release.yml" },
+      "source": { "gh": ".github/workflows/release.yml" },
+      "dest": { "gh": ".github/workflows/release.yml" }
+    },
+    "pullRequestTemplate": {
+      "category": "repoScaffold",
+      "kind": { "gh": "prTemplate" },
+      "description": "Simple pull-request template (what changed / checklist / release impact). N+-appropriate: no SemVer type-of-change matrix.",
+      "platforms": ["gh"],
+      "assets": { "gh": "gh.prTemplate.pullRequestTemplate.md" },
+      "source": { "gh": ".github/PULL_REQUEST_TEMPLATE.md" },
+      "dest": { "gh": ".github/PULL_REQUEST_TEMPLATE.md" }
+    },
+    "issueTemplates": {
+      "category": "repoScaffold",
+      "kind": { "gh": "issueTemplate" },
+      "description": "Issue-form set (directory asset): a simple problem/template-request form + _config.yml (blank issues off, README link).",
+      "platforms": ["gh"],
+      "assets": { "gh": "gh.issueTemplate.issueTemplates.zip" },
+      "source": { "gh": ".github/ISSUE_TEMPLATE" },
+      "dest": { "gh": ".github/ISSUE_TEMPLATE" }
     }
   }
 }

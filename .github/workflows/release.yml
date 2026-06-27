@@ -114,7 +114,34 @@ jobs:
               $checksums.Add("$tree  $asset")
           }
 
-          if($azd.Count -eq 0 -and $ghDirs.Count -eq 0){ throw 'No templates found under templates/.' }
+          # --- repoScaffold: workflows / markdown / issue forms shipped from .github (dogfooded) ---
+          # Manifest-driven (not globbed): each repoScaffold entry names its own source path + asset name.
+          # File source -> single-file asset (anchor = file SHA256). Directory source -> zip (anchor = tree hash).
+          $repoScaffoldCount = 0
+          if(Test-Path './manifest.json'){
+              $mf = Get-Content -LiteralPath './manifest.json' -Raw | ConvertFrom-Json
+              foreach($prop in $mf.templates.PSObject.Properties){
+                  $t = $prop.Value
+                  if($t.category -ne 'repoScaffold'){ continue }
+                  $asset = $t.assets.gh
+                  $src   = $t.source.gh
+                  if(-not $asset -or -not $src){ throw "repoScaffold '$($prop.Name)' is missing a gh asset/source in the manifest." }
+                  if(-not (Test-Path -LiteralPath $src)){ throw "repoScaffold '$($prop.Name)' source '$src' does not exist." }
+                  if(Test-Path -LiteralPath $src -PathType Leaf){
+                      Copy-Item -LiteralPath $src -Destination (Join-Path 'dist' $asset)
+                      $hash = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash.ToLower()
+                      $checksums.Add("$hash  $asset")
+                  }else{
+                      Compress-Archive -Path (Join-Path $src '*') -DestinationPath (Join-Path 'dist' $asset) -Force
+                      $tree = Get-TreeHash -Root $src
+                      $checksums.Add("$tree  $asset")
+                  }
+                  Write-Verbose "Staged repoScaffold '$($prop.Name)' -> $asset (from $src)"
+                  $repoScaffoldCount++
+              }
+          }
+
+          if($azd.Count -eq 0 -and $ghDirs.Count -eq 0 -and $repoScaffoldCount -eq 0){ throw 'No templates found.' }
 
           ($checksums | Sort-Object) -join "`n" | Out-File -FilePath 'dist/checksums.txt' -Encoding utf8 -NoNewline
           if(Test-Path './manifest.json'){ Copy-Item -LiteralPath './manifest.json' -Destination 'dist/manifest.json' }
