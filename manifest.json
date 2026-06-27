@@ -94,6 +94,15 @@
     "_comment": "A 'set' is a named bundle applied in one call (Add-MORepoScaffold). type 'archetype' = a curated, tested-together list of steps (each a 'file' member, or a 'provision' step that runs an allow-listed scaffold cmdlet); type 'selector' = a derived query over templates' category/kind, evaluated against THIS manifest version (late-bound but deterministic, since each released manifest is immutable and the lock pins the version)."
   },
   "sets": {
+    "pipelineCore": {
+      "type": "archetype",
+      "description": "The two load-bearing pipeline building blocks - register feeds + install modules - vendored as a pair (no repo furniture, no provisioning) so you can stand up and exercise the credential/install spine fast. Works on azd or gh.",
+      "platforms": ["azd", "gh"],
+      "steps": [
+        { "type": "file", "template": "registerModusOpsFeeds" },
+        { "type": "file", "template": "installModusOpsModules" }
+      ]
+    },
     "templateLibrary": {
       "type": "archetype",
       "description": "A modusOps template-library repo: PR-validation + rolling-integer release workflows + PR/issue furniture.",

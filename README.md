@@ -113,6 +113,7 @@ in `manifest.json` under `sets`:
 
 | Set | Type | Members |
 | --- | --- | --- |
+| `pipelineCore` | archetype (curated, azd + gh) | just the load-bearing pair — `registerModusOpsFeeds` + `installModusOpsModules` (no furniture, no provisioning) |
 | `templateLibrary` | archetype (curated, gh) | `templatesRepoPRValidation` + `templatesRepoRelease` + `templatesRepoPullRequest` + `templatesRepoIssue` + `templatesRepoIssueConfig` |
 | `workflowSet` | selector (derived, gh) | every `repoScaffold` `workflow` (auto-includes new ones) |
 | `azdOpsRepo` | archetype (azd, file + provision) | register/install pair, then branch-policy + build-service repo permission over REST |
@@ -127,7 +128,8 @@ never invoke an arbitrary command.
 
 ```powershell
 Set-MOPlatform gh                                    # set the default once
-Add-MORepoScaffold -Archetype templateLibrary        # stamp the whole set, lock-pinned
+Add-MORepoScaffold -Archetype pipelineCore           # just the register + install pair — quickest start
+Add-MORepoScaffold -Archetype templateLibrary        # or stamp the whole templates-repo set, lock-pinned
 
 # azd: vendor + provision in one call
 Add-MORepoScaffold -Archetype azdOpsRepo -OrganizationUri https://dev.azure.com/contoso `
