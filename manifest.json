@@ -98,6 +98,19 @@
       "description": "All repoScaffold workflow furniture for the platform (derived - auto-includes new workflow templates).",
       "platforms": ["gh"],
       "select": { "category": "repoScaffold", "kind": "workflow" }
+    },
+    "azdOpsRepo": {
+      "type": "archetype",
+      "description": "Stand up a modusOps Azure DevOps operations repo: vendor the register/install pair, then wire branch-policy + build-service repo permission over REST. Provide -With @{ repo; buildId } and the org/project context.",
+      "platforms": ["azd"],
+      "steps": [
+        { "type": "file", "template": "registerModusOpsFeeds" },
+        { "type": "file", "template": "installModusOpsModules" },
+        { "type": "provision", "id": "buildValidation", "cmdlet": "Add-MOAzureDevOpsModusBuildValidation",
+          "with": { "RepositoryName": "{repo}", "BuildDefinitionId": "{buildId}" } },
+        { "type": "provision", "id": "repoPermission", "cmdlet": "Set-MOAzureDevOpsModusRepoPermission",
+          "with": { "RepositoryName": "{repo}", "IdentityName": "{repo} Build Service" } }
+      ]
     }
   }
 }
