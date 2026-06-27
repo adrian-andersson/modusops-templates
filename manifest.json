@@ -2,15 +2,13 @@
   "manifestVersion": 2,
   "library": "modusops-templates",
   "assetKinds": {
-    "_comment": "Asset extension signals the vendor shape: '.yml'/'.md' = single file vendored to its dest; '.zip' = a DIRECTORY vendored as a tree (expand on fetch). The lockfile drift anchor for '.zip' assets is a CANONICAL TREE HASH (sorted relative paths + per-file SHA256), not the zip's own SHA, since zip archives are not byte-reproducible.",
+    "_comment": "Asset extension signals the vendor shape: '.yml'/'.md' = single file vendored to its dest; '.zip' = a composite-action DIRECTORY (action.yml at root) vendored as <name>/. Integrity is always a file SHA256 (single file, or the inner action.yml).",
     ".yml": "file",
     ".md": "file",
     ".zip": "dir"
   },
   "_categories": {
-    "_comment": "category = consumption intent. 'pipeline' = a building block composed INTO a pipeline (dest is consumer-chosen via the tooling's -Path). 'repoScaffold' = repo furniture STAMPED into a repo at a FIXED dest (source is dogfooded from this repo's own .github/).",
-    "pipeline": "compose into a pipeline",
-    "repoScaffold": "stamp into a repo at a fixed dest"
+    "_comment": "category = consumption intent. 'pipeline' = a building block composed INTO a pipeline (platform-agnostic; dest is consumer-chosen via -Path). 'repoScaffold' = repo furniture STAMPED into a repo at a FIXED dest; repoScaffold assets carry a 'repoType' naming the kind of repo they belong to (so e.g. a templatesRepo PR-validation is distinct from a future moduleRepo one)."
   },
   "templates": {
     "registerModusOpsFeeds": {
@@ -41,45 +39,59 @@
       "platforms": ["azd", "gh"],
       "assets": { "azd": "azd.sendDiscordChannelMessage.yml", "gh": "gh.sendDiscordChannelMessage.zip" }
     },
-    "prValidation": {
+    "templatesRepoPRValidation": {
       "category": "repoScaffold",
+      "repoType": "templatesRepo",
       "kind": { "gh": "workflow" },
-      "description": "PR-gate workflow: lints azd + gh templates (structure / parameter / gh-action / secret) and blocks merge on gating issues.",
+      "description": "[templates repo] PR-gate workflow: lints azd + gh templates (structure / parameter / gh-action / secret) and blocks merge on gating issues.",
       "platforms": ["gh"],
-      "assets": { "gh": "gh.workflow.prValidation.yml" },
+      "assets": { "gh": "gh.workflow.templatesRepoPRValidation.yml" },
       "source": { "gh": ".github/workflows/prValidation.yml" },
       "dest": { "gh": ".github/workflows/prValidation.yml" }
     },
-    "release": {
+    "templatesRepoRelease": {
       "category": "repoScaffold",
+      "repoType": "templatesRepo",
       "kind": { "gh": "workflow" },
-      "description": "Release workflow: on merge to main cuts the next rolling-integer tag (vN) and attaches the full template set + checksums.txt + manifest.json.",
+      "description": "[templates repo] Release workflow: on merge to main cuts the next rolling-integer tag (vN) and attaches the full template set + checksums.txt + manifest.json.",
       "platforms": ["gh"],
-      "assets": { "gh": "gh.workflow.release.yml" },
+      "assets": { "gh": "gh.workflow.templatesRepoRelease.yml" },
       "source": { "gh": ".github/workflows/release.yml" },
       "dest": { "gh": ".github/workflows/release.yml" }
     },
-    "pullRequestTemplate": {
+    "templatesRepoPullRequest": {
       "category": "repoScaffold",
+      "repoType": "templatesRepo",
       "kind": { "gh": "prTemplate" },
-      "description": "Simple pull-request template (what changed / checklist / release impact). N+-appropriate: no SemVer type-of-change matrix.",
+      "description": "[templates repo] Simple pull-request template (what changed / checklist / release impact). N+-appropriate: no SemVer type-of-change matrix.",
       "platforms": ["gh"],
-      "assets": { "gh": "gh.prTemplate.pullRequestTemplate.md" },
+      "assets": { "gh": "gh.prTemplate.templatesRepoPullRequest.md" },
       "source": { "gh": ".github/PULL_REQUEST_TEMPLATE.md" },
       "dest": { "gh": ".github/PULL_REQUEST_TEMPLATE.md" }
     },
-    "issueTemplates": {
+    "templatesRepoIssue": {
       "category": "repoScaffold",
+      "repoType": "templatesRepo",
       "kind": { "gh": "issueTemplate" },
-      "description": "Issue-form set (directory asset): a simple problem/template-request form + _config.yml (blank issues off, README link).",
+      "description": "[templates repo] Issue form: report a problem with a template/workflow, or request a new one.",
       "platforms": ["gh"],
-      "assets": { "gh": "gh.issueTemplate.issueTemplates.zip" },
-      "source": { "gh": ".github/ISSUE_TEMPLATE" },
-      "dest": { "gh": ".github/ISSUE_TEMPLATE" }
+      "assets": { "gh": "gh.issueTemplate.templatesRepoIssue.yml" },
+      "source": { "gh": ".github/ISSUE_TEMPLATE/issue.yml" },
+      "dest": { "gh": ".github/ISSUE_TEMPLATE/issue.yml" }
+    },
+    "templatesRepoIssueConfig": {
+      "category": "repoScaffold",
+      "repoType": "templatesRepo",
+      "kind": { "gh": "issueTemplate" },
+      "description": "[templates repo] Issue-template chooser config (config.yml): blank issues off + a docs link. GitHub requires this exact filename.",
+      "platforms": ["gh"],
+      "assets": { "gh": "gh.issueTemplate.templatesRepoIssueConfig.yml" },
+      "source": { "gh": ".github/ISSUE_TEMPLATE/config.yml" },
+      "dest": { "gh": ".github/ISSUE_TEMPLATE/config.yml" }
     }
   },
   "_sets": {
-    "_comment": "A 'set' is a named bundle applied in one call (Add-MORepoScaffold). type 'archetype' = a curated, tested-together list of steps (each a 'file' member, or a 'provision' step deferred to P4); type 'selector' = a derived query over templates' category/kind, evaluated against THIS manifest version (late-bound but deterministic, since each released manifest is immutable and the lock pins the version)."
+    "_comment": "A 'set' is a named bundle applied in one call (Add-MORepoScaffold). type 'archetype' = a curated, tested-together list of steps (each a 'file' member, or a 'provision' step that runs an allow-listed scaffold cmdlet); type 'selector' = a derived query over templates' category/kind, evaluated against THIS manifest version (late-bound but deterministic, since each released manifest is immutable and the lock pins the version)."
   },
   "sets": {
     "templateLibrary": {
@@ -87,10 +99,11 @@
       "description": "A modusOps template-library repo: PR-validation + rolling-integer release workflows + PR/issue furniture.",
       "platforms": ["gh"],
       "steps": [
-        { "type": "file", "template": "prValidation" },
-        { "type": "file", "template": "release" },
-        { "type": "file", "template": "pullRequestTemplate" },
-        { "type": "file", "template": "issueTemplates" }
+        { "type": "file", "template": "templatesRepoPRValidation" },
+        { "type": "file", "template": "templatesRepoRelease" },
+        { "type": "file", "template": "templatesRepoPullRequest" },
+        { "type": "file", "template": "templatesRepoIssue" },
+        { "type": "file", "template": "templatesRepoIssueConfig" }
       ]
     },
     "workflowSet": {
