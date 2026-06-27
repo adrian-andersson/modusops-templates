@@ -35,33 +35,34 @@ manifest.json   Authoritative index: per-template category / kind / asset / dest
 
 ## Asset shapes & integrity
 
-An asset is either a single file or a directory, and its integrity anchor follows that shape. The
-consumer tooling recomputes the anchor at `Add`/`Test` time; `release.yml` writes the same values to
+Integrity is **always a single file SHA256** — there is no multi-file/tree path. An asset is either a
+single file, or a composite-action directory whose anchor is its inner `action.yml`. The consumer
+tooling recomputes the anchor at `Add`/`Test` time; `release.yml` writes the same values to
 `checksums.txt`.
 
 | Shape | Examples | Release asset | Integrity anchor |
 | --- | --- | --- | --- |
-| **single file** | azd template, gh workflow, PR template | `<...>.yml` / `<...>.md` | **file SHA256** |
+| **single file** | azd template, gh workflow, PR template, one issue form | `<...>.yml` / `<...>.md` | **file SHA256** |
 | **composite action** (dir with `action.yml`) | gh register / install / notify | `gh.<name>.zip` | `action.yml` **file SHA256** |
-| **directory set** (multi-file dir) | issue-template set | `gh.<kind>.<name>.zip` | **canonical tree hash** |
 
-> **Why a tree hash for multi-file dirs?** Zip archives are not byte-reproducible (timestamps, entry
-> ordering), so the zip's own SHA can't be recomputed from the expanded files. The anchor is a
-> **canonical tree hash**: for every file, take its repo-relative POSIX path + SHA256, sort by path,
-> concatenate as `"<relpath>\n<sha>\n"`, and SHA256 the result. A single-file composite action stays on
-> the plain `action.yml` SHA256 (simpler lock-vs-file check); only genuinely multi-file dirs need the
-> tree hash.
+> **One file per asset.** Repo furniture that used to ship as a multi-file directory (the issue-template
+> set) is now split into **one asset per file** — e.g. `templatesRepoIssue` (the form) and
+> `templatesRepoIssueConfig` (`config.yml`). This keeps every asset on the plain file-SHA path: drift is
+> a one-file hash compare, and a shared dest dir like `.github/ISSUE_TEMPLATE/` never causes false drift
+> from a sibling file. The earlier canonical-tree-hash path has been retired.
 
-This is **Option A** (directory/archive assets) from `azdConcepts/TemplateLibrary.md` — chosen so gh
-assets keep their honest directory shape rather than being squeezed into a single file.
+Composite-action zips are **Option A** (directory/archive assets) from `azdConcepts/TemplateLibrary.md`
+— chosen so gh actions keep their honest directory shape rather than being squeezed into a single file.
 
 ## Naming convention
 
 - **Release asset:** `{platform}.{name}.{ext}` for `pipeline` assets;
   `{platform}.{kind}.{name}.{ext}` for `repoScaffold` assets (the `kind` — `workflow` / `prTemplate` /
-  `issueTemplate` — disambiguates the furniture). `platform` is `azd`/`gh`; `name` is camelCase with
-  **no dots** (the dot is the field separator); `ext` is `yml`/`md` (file) or `zip` (directory).
-  Examples: `azd.registerModusOpsFeeds.yml`, `gh.registerModusOpsFeeds.zip`, `gh.workflow.release.yml`.
+  `issueTemplate` — disambiguates the furniture). The `name` of a `repoScaffold` asset is **prefixed
+  with its repo type** (`templatesRepo*`) so you can tell which kind of repo it furnishes. `platform` is
+  `azd`/`gh`; `name` is camelCase with **no dots** (the dot is the field separator); `ext` is `yml`/`md`
+  (file) or `zip` (directory). Examples: `azd.registerModusOpsFeeds.yml`,
+  `gh.registerModusOpsFeeds.zip`, `gh.workflow.templatesRepoRelease.yml`.
 - **Vendored shape:** a single-file asset lands at its dest as-is; a `.zip` expands into a directory.
   `pipeline` assets vendor into the consumer's templates dir (the platform prefix is dropped);
   `repoScaffold` assets vendor to their **fixed `dest`** (`.github/workflows/<name>.yml`, etc.).
@@ -90,14 +91,20 @@ through the bound `GITHUB_TOKEN`, Discord notify, `@vN` pin) was validated on a 
 
 ### Repo scaffolding (`repoScaffold`, gh)
 
-These are this repo's own `.github/` furniture, shipped as assets and vendored to a fixed dest:
+These are this repo's own `.github/` furniture, shipped as assets and vendored to a fixed dest. The
+names carry a **`repoType` prefix** (`templatesRepo`) so it's clear they furnish a *templates* repo —
+a future `moduleRepo*` PR-validation would be a distinct, non-colliding asset:
 
 | Name | Kind | Dest | Purpose |
 | --- | --- | --- | --- |
-| `prValidation` | workflow | `.github/workflows/prValidation.yml` | PR-gate template linter. |
-| `release` | workflow | `.github/workflows/release.yml` | Rolling-integer release + asset attach. |
-| `pullRequestTemplate` | prTemplate | `.github/PULL_REQUEST_TEMPLATE.md` | Simple PR template (N+, no SemVer matrix). |
-| `issueTemplates` | issueTemplate | `.github/ISSUE_TEMPLATE/` | Issue-form set (form + `_config.yml`). |
+| `templatesRepoPRValidation` | workflow | `.github/workflows/prValidation.yml` | PR-gate template linter. |
+| `templatesRepoRelease` | workflow | `.github/workflows/release.yml` | Rolling-integer release + asset attach. |
+| `templatesRepoPullRequest` | prTemplate | `.github/PULL_REQUEST_TEMPLATE.md` | Simple PR template (N+, no SemVer matrix). |
+| `templatesRepoIssue` | issueTemplate | `.github/ISSUE_TEMPLATE/issue.yml` | Issue form (report / request a template). |
+| `templatesRepoIssueConfig` | issueTemplate | `.github/ISSUE_TEMPLATE/config.yml` | Issue-chooser config (blank off + docs link). |
+
+> The issue furniture is **two single-file assets**, not one directory set — see *Asset shapes &
+> integrity* above. `config.yml` is GitHub's required exact filename (it was `_config.yml`).
 
 ### Sets (archetypes)
 
@@ -106,7 +113,7 @@ in `manifest.json` under `sets`:
 
 | Set | Type | Members |
 | --- | --- | --- |
-| `templateLibrary` | archetype (curated, gh) | `prValidation` + `release` + `pullRequestTemplate` + `issueTemplates` |
+| `templateLibrary` | archetype (curated, gh) | `templatesRepoPRValidation` + `templatesRepoRelease` + `templatesRepoPullRequest` + `templatesRepoIssue` + `templatesRepoIssueConfig` |
 | `workflowSet` | selector (derived, gh) | every `repoScaffold` `workflow` (auto-includes new ones) |
 | `azdOpsRepo` | archetype (azd, file + provision) | register/install pair, then branch-policy + build-service repo permission over REST |
 
