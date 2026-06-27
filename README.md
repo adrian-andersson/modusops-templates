@@ -1,56 +1,77 @@
 # modusops-templates
 
-Central, versioned library of [modusOps](https://github.com/adrian-andersson) pipeline templates.
+Central, versioned library of [modusOps](https://github.com/adrian-andersson) **pipeline templates and
+repo scaffolding**.
 
-This repo is a **source, not a live dependency**. The modusOps tooling pulls a template's YAML from a
-GitHub Release and **writes it as a local file** into the consumer's repo (vendor-at-fetch). Nothing
-here is referenced at pipeline compile- or run-time — the privileged template is reviewed in the
-consumer's own PR and pinned (version + SHA256) in a `.modusops.lock` file.
+This repo is a **source, not a live dependency**. The modusOps tooling pulls an asset from a GitHub
+Release and **writes it as a local file** into the consumer's repo (vendor-at-fetch). Nothing here is
+referenced at pipeline compile- or run-time — the privileged asset is reviewed in the consumer's own PR
+and pinned (version + hash) in a `.modusops.lock` file.
+
+## Two categories
+
+Every asset has a **`category`** that decides *how it's consumed*:
+
+- **`pipeline`** — a building block you *compose into* a pipeline (register / install / notify). Vendored
+  into a consumer-chosen templates dir.
+- **`repoScaffold`** — repo *furniture* you *stamp into* a repo at a **fixed dest** under `.github/`
+  (CI workflows, PR/issue templates). These are **dogfooded** — the assets shipped are this repo's own
+  `.github/` files.
 
 ## Layout
 
 ```text
 templates/
-  azd/   Azure DevOps templates  — one file per template (`templates/azd/<name>.yml`)
-  gh/    GitHub templates        — composite-action DIRECTORIES (`templates/gh/<name>/action.yml`)
-manifest.json   Authoritative name -> asset map (the tooling resolves via this, not by parsing filenames)
-.github/workflows/
-  prValidation.yml   Lints azd + gh templates on PRs (structure / parameter / gh-action / secret errors gate merge)
-  release.yml        Cuts the next rolling-integer tag (vN) on merge + attaches the template assets
-                     (+ checksums.txt + manifest.json) to a GitHub Release. The same vN is the gh `...@vN` ref pin.
+  azd/   pipeline templates  — one file per template (`templates/azd/<name>.yml`)
+  gh/    pipeline composite actions — DIRECTORIES (`templates/gh/<name>/action.yml`)
+.github/   this repo's OWN CI + furniture, ALSO shipped as repoScaffold assets (dogfooded):
+  workflows/prValidation.yml   lints azd + gh templates on PRs (structure / parameter / gh-action / secret → gate)
+  workflows/release.yml        cuts the next rolling-integer tag (vN) on merge + attaches the full asset set
+                               (+ checksums.txt + manifest.json). The same vN is the gh `...@vN` ref pin.
+  PULL_REQUEST_TEMPLATE.md     pr template     |   ISSUE_TEMPLATE/   issue-form set
+manifest.json   Authoritative index: per-template category / kind / asset / dest, plus the `sets`
+                (archetypes). The tooling resolves via this, not by parsing filenames.
 ```
 
-## Asset shape (per platform)
+## Asset shapes & integrity
 
-A GH composite action is a **directory** (`action.yml` + optionally scripts), not a single file, so the
-two platforms ship differently:
+An asset is either a single file or a directory, and its integrity anchor follows that shape. The
+consumer tooling recomputes the anchor at `Add`/`Test` time; `release.yml` writes the same values to
+`checksums.txt`.
 
-| Platform | Source | Release asset | Integrity anchor |
+| Shape | Examples | Release asset | Integrity anchor |
 | --- | --- | --- | --- |
-| `azd` | `templates/azd/<name>.yml` | `azd.<name>.yml` (single file) | file SHA256 |
-| `gh` | `templates/gh/<name>/action.yml` (+ any sidecars) | `gh.<name>.zip` (zipped directory) | **canonical tree hash** |
+| **single file** | azd template, gh workflow, PR template | `<...>.yml` / `<...>.md` | **file SHA256** |
+| **composite action** (dir with `action.yml`) | gh register / install / notify | `gh.<name>.zip` | `action.yml` **file SHA256** |
+| **directory set** (multi-file dir) | issue-template set | `gh.<kind>.<name>.zip` | **canonical tree hash** |
 
-> **Why a tree hash, not the zip's SHA?** Zip archives are not byte-reproducible (timestamps, entry
-> ordering), so the zip's own SHA can't be recomputed by a consumer from the expanded files. The drift
-> anchor is therefore a **canonical tree hash**: for every file in the action dir, take its repo-relative
-> POSIX path + its SHA256, sort by path, concatenate as `"<relpath>\n<sha>\n"` and SHA256 the result.
-> `release.yml` writes this value to `checksums.txt`; the consumer tooling recomputes it at `Add`/`Test`
-> time. (Single-file `azd` assets just use the file SHA256.)
+> **Why a tree hash for multi-file dirs?** Zip archives are not byte-reproducible (timestamps, entry
+> ordering), so the zip's own SHA can't be recomputed from the expanded files. The anchor is a
+> **canonical tree hash**: for every file, take its repo-relative POSIX path + SHA256, sort by path,
+> concatenate as `"<relpath>\n<sha>\n"`, and SHA256 the result. A single-file composite action stays on
+> the plain `action.yml` SHA256 (simpler lock-vs-file check); only genuinely multi-file dirs need the
+> tree hash.
 
 This is **Option A** (directory/archive assets) from `azdConcepts/TemplateLibrary.md` — chosen so gh
-templates keep their honest composite-action shape rather than being squeezed into a single file.
+assets keep their honest directory shape rather than being squeezed into a single file.
 
 ## Naming convention
 
-- **Release asset:** `{platform}.{name}.{ext}` — `platform` is `azd` or `gh`; `name` is camelCase with
-  **no dots** (the dot is reserved as the field separator); `ext` is `yml` (azd) or `zip` (gh).
-  Examples: `azd.registerModusOpsFeeds.yml`, `gh.registerModusOpsFeeds.zip`.
-- **Vendored local shape:** `azd` → `<name>.yml`; `gh` → `<name>/` (the zip expands into a directory).
-  The platform prefix is dropped once it's in the consumer repo.
-- **Channels are versions, not filenames.** A preview/prerelease template is the same asset published
-  at a prerelease library tag (`vX.Y.Z-preview.N`), recorded in the lockfile. There is no `.preview` asset.
+- **Release asset:** `{platform}.{name}.{ext}` for `pipeline` assets;
+  `{platform}.{kind}.{name}.{ext}` for `repoScaffold` assets (the `kind` — `workflow` / `prTemplate` /
+  `issueTemplate` — disambiguates the furniture). `platform` is `azd`/`gh`; `name` is camelCase with
+  **no dots** (the dot is the field separator); `ext` is `yml`/`md` (file) or `zip` (directory).
+  Examples: `azd.registerModusOpsFeeds.yml`, `gh.registerModusOpsFeeds.zip`, `gh.workflow.release.yml`.
+- **Vendored shape:** a single-file asset lands at its dest as-is; a `.zip` expands into a directory.
+  `pipeline` assets vendor into the consumer's templates dir (the platform prefix is dropped);
+  `repoScaffold` assets vendor to their **fixed `dest`** (`.github/workflows/<name>.yml`, etc.).
+- **Channels are versions, not filenames.** Pin a `vN` in the lockfile; never blind "latest". (A
+  prerelease channel under rolling-integer versioning is an open question — see
+  `azdConcepts/TemplateLibrary.md`.)
 
-## Current templates
+## Current assets
+
+### Pipeline templates
 
 | Name | azd | gh | Purpose |
 | --- | :-: | :-: | --- |
@@ -66,6 +87,35 @@ one job — the per-run SecretStore vault built by `registerModusOpsFeeds` must 
 `installModusOpsModules`, which only holds within a single job. The whole chain (register, private install
 through the bound `GITHUB_TOKEN`, Discord notify, `@vN` pin) was validated on a hosted ubuntu runner; see
 `azdConcepts/TemplateLibrary.md` (§ GitHub Actions portability / PoC result).
+
+### Repo scaffolding (`repoScaffold`, gh)
+
+These are this repo's own `.github/` furniture, shipped as assets and vendored to a fixed dest:
+
+| Name | Kind | Dest | Purpose |
+| --- | --- | --- | --- |
+| `prValidation` | workflow | `.github/workflows/prValidation.yml` | PR-gate template linter. |
+| `release` | workflow | `.github/workflows/release.yml` | Rolling-integer release + asset attach. |
+| `pullRequestTemplate` | prTemplate | `.github/PULL_REQUEST_TEMPLATE.md` | Simple PR template (N+, no SemVer matrix). |
+| `issueTemplates` | issueTemplate | `.github/ISSUE_TEMPLATE/` | Issue-form set (form + `_config.yml`). |
+
+### Sets (archetypes)
+
+A **set** is a named bundle applied in one call with `Add-MORepoScaffold`. Two shapes, both declared
+in `manifest.json` under `sets`:
+
+| Set | Type | Members |
+| --- | --- | --- |
+| `templateLibrary` | archetype (curated) | `prValidation` + `release` + `pullRequestTemplate` + `issueTemplates` |
+| `workflowSet` | selector (derived) | every `repoScaffold` `workflow` (auto-includes new ones) |
+
+A **curated** set is an explicit, tested-together list; a **selector** is a query over `category`/`kind`
+evaluated against that manifest version (late-bound but deterministic — the version is lock-pinned).
+
+```powershell
+Set-MOPlatform gh                                    # set the default once
+Add-MORepoScaffold -Archetype templateLibrary        # stamp the whole set, lock-pinned
+```
 
 ### gh consumer usage (sketch)
 

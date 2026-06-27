@@ -77,5 +77,27 @@
       "source": { "gh": ".github/ISSUE_TEMPLATE" },
       "dest": { "gh": ".github/ISSUE_TEMPLATE" }
     }
+  },
+  "_sets": {
+    "_comment": "A 'set' is a named bundle applied in one call (Add-MORepoScaffold). type 'archetype' = a curated, tested-together list of steps (each a 'file' member, or a 'provision' step deferred to P4); type 'selector' = a derived query over templates' category/kind, evaluated against THIS manifest version (late-bound but deterministic, since each released manifest is immutable and the lock pins the version)."
+  },
+  "sets": {
+    "templateLibrary": {
+      "type": "archetype",
+      "description": "A modusOps template-library repo: PR-validation + rolling-integer release workflows + PR/issue furniture.",
+      "platforms": ["gh"],
+      "steps": [
+        { "type": "file", "template": "prValidation" },
+        { "type": "file", "template": "release" },
+        { "type": "file", "template": "pullRequestTemplate" },
+        { "type": "file", "template": "issueTemplates" }
+      ]
+    },
+    "workflowSet": {
+      "type": "selector",
+      "description": "All repoScaffold workflow furniture for the platform (derived - auto-includes new workflow templates).",
+      "platforms": ["gh"],
+      "select": { "category": "repoScaffold", "kind": "workflow" }
+    }
   }
 }
