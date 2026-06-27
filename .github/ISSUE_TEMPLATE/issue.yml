@@ -1,0 +1,30 @@
+name: Report a problem or request a template
+description: Something wrong with a template / workflow, or a new one you'd like added.
+labels: [triage]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is this about?
+      options:
+        - A template or action isn't working as expected
+        - A workflow (PR validation / release) issue
+        - Request a new template or workflow
+        - Documentation
+    validations:
+      required: true
+
+  - type: input
+    id: subject
+    attributes:
+      label: Which template / workflow?
+      description: e.g. registerModusOpsFeeds, release.yml
+      placeholder: registerModusOpsFeeds
+
+  - type: textarea
+    id: detail
+    attributes:
+      label: Details
+      description: What happened (and how to reproduce, if a bug), or what you'd like added and why.
+    validations:
+      required: true

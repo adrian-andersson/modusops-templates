@@ -16,8 +16,8 @@ templates/
 manifest.json   Authoritative name -> asset map (the tooling resolves via this, not by parsing filenames)
 .github/workflows/
   prValidation.yml   Lints azd + gh templates on PRs (structure / parameter / gh-action / secret errors gate merge)
-  release.yml        SemVer tag on merge + attach the template assets (+ checksums.txt) to a GitHub Release
-  tag.yml            Cuts single-int `vN` ref tags so gh consumers can pin `...@vN`
+  release.yml        Cuts the next rolling-integer tag (vN) on merge + attaches the template assets
+                     (+ checksums.txt + manifest.json) to a GitHub Release. The same vN is the gh `...@vN` ref pin.
 ```
 
 ## Asset shape (per platform)
@@ -93,8 +93,11 @@ Templates stay **thin** — orchestration only. Real logic lives in versioned Po
 
 ## Versioning & releases
 
-- **Whole-library SemVer.** Each merge to `main` cuts a patch release (minor/major via a manual run).
-  The version is the *set-level* compatibility coordinate; pin it in the consumer lockfile.
+- **Whole-library rolling integer (N+).** Each merge to `main` cuts the next single-integer tag
+  (`v1`, `v2`, `v3`, …); the first release is `v1`. The version is the *set-level* compatibility
+  coordinate; pin it in the consumer lockfile. The same `vN` tag is also the immutable ref for gh
+  consumers who pin cross-repo (`...@vN`) — one tag scheme, not two. (SemVer was retired: the library
+  is a curated set, so one monotonic coordinate is simpler than per-component versions.)
 - **Full template set is attached to every release** (self-contained, safe to prune old releases).
 - **Release notes list only what actually changed** (diffed against the previous tag), so an unchanged
   template never looks like it was modified.
