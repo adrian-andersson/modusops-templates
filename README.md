@@ -106,15 +106,25 @@ in `manifest.json` under `sets`:
 
 | Set | Type | Members |
 | --- | --- | --- |
-| `templateLibrary` | archetype (curated) | `prValidation` + `release` + `pullRequestTemplate` + `issueTemplates` |
-| `workflowSet` | selector (derived) | every `repoScaffold` `workflow` (auto-includes new ones) |
+| `templateLibrary` | archetype (curated, gh) | `prValidation` + `release` + `pullRequestTemplate` + `issueTemplates` |
+| `workflowSet` | selector (derived, gh) | every `repoScaffold` `workflow` (auto-includes new ones) |
+| `azdOpsRepo` | archetype (azd, file + provision) | register/install pair, then branch-policy + build-service repo permission over REST |
 
 A **curated** set is an explicit, tested-together list; a **selector** is a query over `category`/`kind`
 evaluated against that manifest version (late-bound but deterministic — the version is lock-pinned).
 
+A step is either a **file** (vendored) or, on azd, a **provision** step that runs a modusOps
+provisioning cmdlet (branch policy, repo permission) — its args bound from the caller's `-With` +
+context. Provision steps are limited to a fixed **allow-list** of cmdlets, so a vendored manifest can
+never invoke an arbitrary command.
+
 ```powershell
 Set-MOPlatform gh                                    # set the default once
 Add-MORepoScaffold -Archetype templateLibrary        # stamp the whole set, lock-pinned
+
+# azd: vendor + provision in one call
+Add-MORepoScaffold -Archetype azdOpsRepo -OrganizationUri https://dev.azure.com/contoso `
+  -ProjectName modusOps -With @{ repo = 'modusOps'; buildId = 42 }
 ```
 
 ### gh consumer usage (sketch)
