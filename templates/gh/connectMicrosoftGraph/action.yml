@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-action.json
 name: 'Connect to Microsoft Graph'
 description: >-
   Connects to Microsoft Graph (app-only) with a client-secret credential. The connection persists into

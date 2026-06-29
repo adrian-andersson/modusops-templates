@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-action.json
 name: 'Set SharePoint file'
 description: >-
   Uploads a local file to a SharePoint document library via Microsoft Graph. EXPECTS AN EXISTING GRAPH

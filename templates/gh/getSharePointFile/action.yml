@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-action.json
 name: 'Get SharePoint file'
 description: >-
   Downloads a file from a SharePoint document library via Microsoft Graph. EXPECTS AN EXISTING GRAPH
