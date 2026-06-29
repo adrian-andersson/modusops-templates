@@ -80,6 +80,9 @@ Composite-action zips are **Option A** (directory/archive assets) from `azdConce
 | `installModusOpsModules` | ✅ | ✅ | Credential-agnostic module install + `always()` teardown. (gh inlines the GitHub Packages folder-casing fix.) |
 | `sendTeamsChannelMessage` | ✅ | ✅¹ | Teams channel webhook notification. |
 | `sendDiscordChannelMessage` | ✅ | ✅ | Discord channel webhook notification. |
+| `connectMicrosoftGraph` | ✅ | ✅ | Connect to Microsoft Graph (app-only, client-secret); persists across steps in the same job. |
+| `getSharePointFile` | ✅ | ✅ | Download a file from a SharePoint library via Graph (needs a prior `connectMicrosoftGraph` in the job). |
+| `setSharePointFile` | ✅ | ✅ | Upload a file to a SharePoint library via Graph (needs a prior `connectMicrosoftGraph` in the job). |
 
 > ¹ The gh Teams action is ported but **not yet exercised on a live Teams webhook** (no test account).
 
@@ -97,8 +100,8 @@ a future `moduleRepo*` PR-validation would be a distinct, non-colliding asset:
 
 | Name | Kind | Dest | Purpose |
 | --- | --- | --- | --- |
-| `templatesRepoPRValidation` | workflow | `.github/workflows/prValidation.yml` | PR-gate template linter. |
-| `templatesRepoRelease` | workflow | `.github/workflows/release.yml` | Rolling-integer release + asset attach. |
+| `templatesRepoPRValidation` | workflow (gh) / pipeline (azd) | `.github/workflows/prValidation.yml` · `.azuredevops/prValidation.yml` | PR-gate template linter. azd port runs behind a branch-policy build validation and comments via the PR-threads REST API. |
+| `templatesRepoRelease` | workflow (gh) / pipeline (azd) | `.github/workflows/release.yml` · `.azuredevops/release.yml` | Cuts the next rolling-integer tag (vN) on merge. gh also attaches the full asset set; azd tags only (the tag is the pin). |
 | `templatesRepoPullRequest` | prTemplate | `.github/PULL_REQUEST_TEMPLATE.md` | Simple PR template (N+, no SemVer matrix). |
 | `templatesRepoIssue` | issueTemplate | `.github/ISSUE_TEMPLATE/issue.yml` | Issue form (report / request a template). |
 | `templatesRepoIssueConfig` | issueTemplate | `.github/ISSUE_TEMPLATE/config.yml` | Issue-chooser config (blank off + docs link). |
@@ -115,7 +118,9 @@ in `manifest.json` under `sets`:
 | --- | --- | --- |
 | `pipelineCore` | archetype (curated, azd + gh) | just the load-bearing pair — `registerModusOpsFeeds` + `installModusOpsModules` (no furniture, no provisioning) |
 | `templateLibrary` | archetype (curated, gh) | `templatesRepoPRValidation` + `templatesRepoRelease` + `templatesRepoPullRequest` + `templatesRepoIssue` + `templatesRepoIssueConfig` |
+| `azdTemplateLibrary` | archetype (azd, file + provision) | the azd `templatesRepoPRValidation` linter pipeline + `templatesRepoRelease` tag pipeline + a branch-policy provision step |
 | `workflowSet` | selector (derived, gh) | every `repoScaffold` `workflow` (auto-includes new ones) |
+| `azdWorkflowSet` | selector (derived, azd) | every `repoScaffold` `pipeline` (the azd analog — auto-includes new azd CI pipelines) |
 | `azdOpsRepo` | archetype (azd, file + provision) | register/install pair, then branch-policy + build-service repo permission over REST |
 
 A **curated** set is an explicit, tested-together list; a **selector** is a query over `category`/`kind`

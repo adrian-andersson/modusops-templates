@@ -1,0 +1,276 @@
+# PR validation for a modusOps templates-library repo hosted on Azure DevOps (azd port of the gh
+# .github/workflows/prValidation.yml). Lints every distributed template (azd `parameters:` includes AND
+# gh composite-action manifests) for:
+#   STRUCTURE (gates merge)  - must parse as YAML, no tab indentation
+#   PARAMETERS (gates merge) - [azd] default not in values, undeclared parameters.X reference,
+#                              missing parameter name, duplicate parameter names
+#   GH ACTION (gates merge)  - [gh] literal ${{ secrets.* }} anywhere, runs.using not 'composite',
+#                              undeclared inputs.X reference
+#   SECRETS (gates merge)    - known credential FORMATS (token prefixes, JWT, PEM, AccountKey=).
+#   PARAM HINTS / STYLE / SPACING (advisory)
+# Posts a ModuleForge-style summary to the PR (Azure DevOps PR-thread REST) and FAILS on gating issues
+# so a BRANCH POLICY build validation blocks the merge. Only templates/ is linted.
+#
+# Azure Repos PRs trigger this via a Branch Policy > Build Validation on main (the `pr:` block below
+# only fires for GitHub-connection repos; for Azure Repos configure the policy). The PR comment uses
+# $(System.AccessToken) - allow it under Project Settings > Pipelines, and grant the build identity
+# 'Contribute to pull requests'.
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+  - task: PowerShell@2
+    displayName: 'Install dependencies'
+    inputs:
+      targetType: 'inline'
+      pwsh: true
+      script: |
+        Install-Module -Name 'powershell-yaml' -Force -SkipPublisherCheck -Scope CurrentUser
+        Import-Module powershell-yaml
+        Get-Module powershell-yaml | Select-Object Name, Version | Format-Table
+
+  - task: PowerShell@2
+    displayName: 'Run template validation review'
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+    inputs:
+      targetType: 'inline'
+      pwsh: true
+      script: |
+        $VerbosePreference = 'Continue'
+        Import-Module powershell-yaml
+
+        # Known credential FORMATS (prefixes / shapes). Deliberately NOT entropy/length based,
+        # so GUIDs (8-4-4-4-12 hex), git SHAs and base64 blobs are not matched.
+        $secretSignatures = @(
+            @{ Name = 'GitHub token';            Pattern = 'gh[pousr]_[A-Za-z0-9]{36,}' }
+            @{ Name = 'GitHub fine-grained PAT'; Pattern = 'github_pat_[A-Za-z0-9_]{30,}' }
+            @{ Name = 'AWS access key id';       Pattern = 'AKIA[0-9A-Z]{16}' }
+            @{ Name = 'Google API key';          Pattern = 'AIza[0-9A-Za-z_\-]{35}' }
+            @{ Name = 'Slack token';             Pattern = 'xox[baprs]-[A-Za-z0-9-]{10,}' }
+            @{ Name = 'Azure storage AccountKey';Pattern = 'AccountKey=[A-Za-z0-9+/=]{20,}' }
+            @{ Name = 'JWT';                     Pattern = 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}' }
+            @{ Name = 'PEM private key';         Pattern = '-----BEGIN [A-Z ]*PRIVATE KEY-----' }
+        )
+        # Parameter NAMES that imply a secret VALUE (not a secret reference like a vault entry name).
+        $secretNamePattern = '(?i)(password|pwd|secret|clientsecret|apikey|api_key|accountkey|connectionstring)'
+
+        $yamlFiles = @(Get-ChildItem -Path './templates' -Recurse -Include '*.yml','*.yaml' -ErrorAction SilentlyContinue)
+        $fileCount = $yamlFiles.Count
+        Write-Verbose "Found $fileCount YAML files"
+
+        $flagged = [System.Collections.Generic.List[object]]::new()
+        foreach($file in $yamlFiles){
+            $raw = Get-Content -LiteralPath $file.FullName -Raw
+            $lines = @(Get-Content -LiteralPath $file.FullName)
+
+            $structure  = [System.Collections.Generic.List[string]]::new()  # gates
+            $paramError = [System.Collections.Generic.List[string]]::new()  # gates
+            $ghError    = [System.Collections.Generic.List[string]]::new()  # gates (gh composite actions)
+            $secret     = [System.Collections.Generic.List[string]]::new()  # gates
+            $paramWarn  = [System.Collections.Generic.List[string]]::new()  # advisory
+            $style      = [System.Collections.Generic.List[string]]::new()  # advisory
+            $spacing    = [System.Collections.Generic.List[string]]::new()  # advisory
+
+            # --- STRUCTURE: must parse as YAML ---
+            $doc = $null
+            try{ $doc = ConvertFrom-Yaml $raw }catch{ $structure.Add("Does not parse: $($_.Exception.Message)") }
+
+            # --- Per-line: tabs (structure), trailing whitespace (spacing), secret formats (secret) ---
+            for($i = 0; $i -lt $lines.Count; $i++){
+                if($lines[$i] -match '^\s*\t'){ $structure.Add("Tab indentation on line $($i+1)") }
+                if($lines[$i] -match ' +$'){ $spacing.Add("Trailing whitespace on line $($i+1)") }
+                foreach($sig in $secretSignatures){
+                    if($lines[$i] -match $sig.Pattern){ $secret.Add("Possible $($sig.Name) literal on line $($i+1)") }
+                }
+            }
+
+            # --- STYLE: duplicate displayName within a file ---
+            $displayNames = [regex]::Matches($raw, '(?m)^\s*displayName:\s*(.+?)\s*$') |
+                ForEach-Object { $_.Groups[1].Value.Trim().Trim("'",'"') }
+            foreach($g in ($displayNames | Group-Object | Where-Object Count -gt 1)){
+                $style.Add("Duplicate displayName '$($g.Name)' ($($g.Count)x)")
+            }
+
+            # --- PARAMETERS: only for AZD-style templates (top-level `parameters:` list) ---
+            if($doc -is [System.Collections.IDictionary] -and $doc.Contains('parameters') -and $doc['parameters']){
+                $params = @($doc['parameters'])
+
+                $declared = [System.Collections.Generic.List[string]]::new()
+                foreach($p in $params){
+                    if(-not ($p -is [System.Collections.IDictionary]) -or -not $p.Contains('name') -or [string]::IsNullOrWhiteSpace($p['name'])){
+                        $paramError.Add('A parameter entry is missing a name')
+                        continue
+                    }
+                    $pname = [string]$p['name']
+                    $declared.Add($pname)
+
+                    if(-not $p.Contains('type')){ $paramWarn.Add("Parameter '$pname' has no explicit type") }
+
+                    if($p.Contains('values') -and $p.Contains('default')){
+                        $vals = @($p['values'])
+                        if($vals -notcontains $p['default']){
+                            $paramError.Add("Parameter '$pname' default '$($p['default'])' is not one of values: $($vals -join ', ')")
+                        }
+                    }
+
+                    if($pname -match $secretNamePattern -and $p.Contains('default')){
+                        $def = "$($p['default'])"
+                        if(-not [string]::IsNullOrWhiteSpace($def) -and $def -notmatch '^\s*(\$\(|\$\{\{)'){
+                            $paramWarn.Add("Parameter '$pname' has a hardcoded default and its name implies a secret")
+                        }
+                    }
+                }
+
+                foreach($g in ($declared | Group-Object | Where-Object Count -gt 1)){
+                    $paramError.Add("Duplicate parameter name '$($g.Name)' ($($g.Count)x)")
+                }
+
+                $refDot = [regex]::Matches($raw, 'parameters\.([A-Za-z_][A-Za-z0-9_]*)') | ForEach-Object { $_.Groups[1].Value }
+                $refIdx = [regex]::Matches($raw, 'parameters\[[''"]([A-Za-z_][A-Za-z0-9_]*)[''"]\]') | ForEach-Object { $_.Groups[1].Value }
+                $referenced = @($refDot + $refIdx) | Select-Object -Unique
+
+                foreach($d in $declared){
+                    if($referenced -notcontains $d){ $paramWarn.Add("Parameter '$d' is declared but never referenced") }
+                }
+                foreach($r in $referenced){
+                    if($declared -notcontains $r){ $paramError.Add("Reference 'parameters.$r' has no matching declaration") }
+                }
+            }
+
+            # --- GH ACTION: composite-action manifests (top-level `runs:` block) ---
+            if($doc -is [System.Collections.IDictionary] -and $doc.Contains('runs')){
+                for($i = 0; $i -lt $lines.Count; $i++){
+                    if($lines[$i] -match '\$\{\{\s*secrets\.'){ $ghError.Add("Literal `${{ secrets.* }}` on line $($i+1) - pass tokens via an input instead") }
+                }
+
+                $runs = $doc['runs']
+                if($runs -is [System.Collections.IDictionary]){
+                    $using = "$($runs['using'])"
+                    if($using -ne 'composite'){ $ghError.Add("runs.using is '$using' - modusOps gh templates must be composite actions") }
+                }
+
+                $declaredInputs = [System.Collections.Generic.List[string]]::new()
+                if($doc.Contains('inputs') -and $doc['inputs'] -is [System.Collections.IDictionary]){
+                    foreach($k in $doc['inputs'].Keys){
+                        $declaredInputs.Add([string]$k)
+                        $spec = $doc['inputs'][$k]
+                        if(-not ($spec -is [System.Collections.IDictionary]) -or -not $spec.Contains('description') -or [string]::IsNullOrWhiteSpace($spec['description'])){
+                            $paramWarn.Add("Input '$k' has no description")
+                        }
+                    }
+                }
+
+                $inRefDot = [regex]::Matches($raw, 'inputs\.([A-Za-z_][A-Za-z0-9_-]*)') | ForEach-Object { $_.Groups[1].Value }
+                $inRefIdx = [regex]::Matches($raw, 'inputs\[[''"]([A-Za-z_][A-Za-z0-9_-]*)[''"]\]') | ForEach-Object { $_.Groups[1].Value }
+                $inReferenced = @($inRefDot + $inRefIdx) | Select-Object -Unique
+
+                foreach($d in $declaredInputs){
+                    if($inReferenced -notcontains $d){ $paramWarn.Add("Input '$d' is declared but never referenced") }
+                }
+                foreach($r in $inReferenced){
+                    if($declaredInputs -notcontains $r){ $ghError.Add("Reference 'inputs.$r' has no matching declaration") }
+                }
+            }
+
+            if($structure.Count -or $paramError.Count -or $ghError.Count -or $secret.Count -or $paramWarn.Count -or $style.Count -or $spacing.Count){
+                $flagged.Add([PSCustomObject]@{
+                    FileName   = ([IO.Path]::GetRelativePath($PWD.Path, $file.FullName) -replace '\\','/')
+                    Structure  = $structure.Count
+                    ParamError = $paramError.Count
+                    GhError    = $ghError.Count
+                    Secret     = $secret.Count
+                    ParamWarn  = $paramWarn.Count
+                    Style      = $style.Count
+                    Spacing    = $spacing.Count
+                    Counter    = "Struct:$($structure.Count) ParamErr:$($paramError.Count) GhErr:$($ghError.Count) Secret:$($secret.Count) ParamWarn:$($paramWarn.Count) Style:$($style.Count) Space:$($spacing.Count)"
+                    Weight     = [int](($structure.Count * 50) + ($paramError.Count * 50) + ($ghError.Count * 50) + ($secret.Count * 100) + ($paramWarn.Count * 10) + ($style.Count * 8) + ($spacing.Count * 5))
+                    Detail     = (@($structure) + @($paramError) + @($ghError) + @($secret) + @($paramWarn) + @($style) + @($spacing)) -join '; '
+                })
+            }
+        }
+
+        $structureTotal  = [int](($flagged | Measure-Object -Property Structure  -Sum).Sum)
+        $paramErrorTotal = [int](($flagged | Measure-Object -Property ParamError -Sum).Sum)
+        $ghErrorTotal    = [int](($flagged | Measure-Object -Property GhError    -Sum).Sum)
+        $secretTotal     = [int](($flagged | Measure-Object -Property Secret     -Sum).Sum)
+        $paramWarnTotal  = [int](($flagged | Measure-Object -Property ParamWarn  -Sum).Sum)
+        $styleTotal      = [int](($flagged | Measure-Object -Property Style      -Sum).Sum)
+        $spacingTotal    = [int](($flagged | Measure-Object -Property Spacing    -Sum).Sum)
+        $gateTotal = $structureTotal + $paramErrorTotal + $ghErrorTotal + $secretTotal
+        Write-Verbose "Struct:$structureTotal ParamErr:$paramErrorTotal GhErr:$ghErrorTotal Secret:$secretTotal ParamWarn:$paramWarnTotal Style:$styleTotal Space:$spacingTotal"
+
+        $flaggedSelect = if($flagged){ $flagged | Sort-Object -Property Weight -Descending | Select-Object -First 10 }else{ $null }
+        $flaggedMarkdown = if($flaggedSelect){@(
+            '### Flagged files'
+            ''
+            '| Filename | Counters | Detail |'
+            '| --- | --- | --- |'
+            $($flaggedSelect.ForEach{ "| $($_.FileName) | $($_.Counter) | $($_.Detail) |" })
+            ''
+        ) -join "`n"}else{ $null }
+
+        $headline = if($gateTotal -gt 0){ '_Structure / parameter / gh-action / secret errors block this PR. Hints, style and spacing are advisory._' }else{ '_No blocking issues. Any items below are advisory._' }
+
+        $report = @(
+            '### Template Validation Review'
+            ''
+            $headline
+            ''
+            "- **YAML files checked:** $fileCount"
+            "- **Structure issues:** $structureTotal $(if($structureTotal -gt 0){'❌'}else{'✅'})"
+            "- **Parameter errors:** $paramErrorTotal $(if($paramErrorTotal -gt 0){'❌'}else{'✅'})"
+            "- **GH action errors:** $ghErrorTotal $(if($ghErrorTotal -gt 0){'❌'}else{'✅'})"
+            "- **Secret findings:** $secretTotal $(if($secretTotal -gt 0){'❌'}else{'✅'})"
+            "- **Parameter hints:** $paramWarnTotal $(if($paramWarnTotal -gt 0){'⚠️'}else{'✅'})"
+            "- **Style hints:** $styleTotal $(if($styleTotal -gt 0){'⚠️'}else{'✅'})"
+            "- **Spacing issues:** $spacingTotal $(if($spacingTotal -gt 0){'⚠️'}else{'✅'})"
+            ''
+            "$flaggedMarkdown"
+            '_Notes:_'
+            ''
+            '- _Up to 10 flagged files shown, weighted (Secret:100 Structure/ParamErr/GhErr:50 ParamWarn:10 Style:8 Spacing:5)._'
+            '- _Structure = must parse as YAML and must not use tab indentation._'
+            '- _Parameter errors = default not in values, undeclared `parameters.X` reference, missing/duplicate name._'
+            '- _GH action errors = literal `${{ secrets.* }}` in a composite manifest, `runs.using` not composite, undeclared `inputs.X` reference._'
+            '- _Secret findings = a known credential format (token prefix, JWT, PEM, AccountKey=). Format-based, so GUIDs are not flagged._'
+            '- _Parameter hints = declared-but-unused param/input, missing explicit type, secret-named param with a literal default, or input missing description._'
+            '- _Style = duplicate displayName within a file. Spacing = trailing whitespace._'
+            ''
+            '_Generated automatically by PR validation._'
+        ) -join "`n"
+
+        Write-Host $report
+
+        # Post the report as a PR thread comment (Azure DevOps REST), only on PR builds.
+        if($env:BUILD_REASON -eq 'PullRequest' -and -not [string]::IsNullOrWhiteSpace($env:SYSTEM_ACCESSTOKEN)){
+            $org     = "$(System.CollectionUri)".TrimEnd('/')
+            $project = "$(System.TeamProject)"
+            $repoId  = "$(Build.Repository.ID)"
+            $prId    = "$(System.PullRequest.PullRequestId)"
+            $uri = "$org/$project/_apis/git/repositories/$repoId/pullRequests/$prId/threads?api-version=7.0"
+            $threadBody = @{
+                comments = @(@{ parentCommentId = 0; content = $report; commentType = 1 })
+                status   = 1   # active
+            } | ConvertTo-Json -Depth 6
+            try{
+                Invoke-RestMethod -Uri $uri -Method Post -ContentType 'application/json' `
+                    -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" } -Body $threadBody | Out-Null
+                Write-Verbose 'Posted validation summary to the PR.'
+            }catch{
+                Write-Warning "Could not post PR comment: $($_.Exception.Message). Check System.AccessToken permissions ('Contribute to pull requests')."
+            }
+        }
+
+        # Gate: structure + parameter + gh-action + secret errors fail the job so a branch-policy
+        # build validation blocks the merge.
+        if($gateTotal -gt 0){
+            throw "Template validation failed: $structureTotal structure + $paramErrorTotal parameter + $ghErrorTotal gh-action + $secretTotal secret finding(s)."
+        }

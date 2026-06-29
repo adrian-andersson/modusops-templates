@@ -1,0 +1,56 @@
+name: 'Set SharePoint file'
+description: >-
+  Uploads a local file to a SharePoint document library via Microsoft Graph. EXPECTS AN EXISTING GRAPH
+  CONNECTION: run the connectMicrosoftGraph action earlier in the SAME job (the connection persists
+  across steps within a job). No credential inputs. Microsoft.Graph.Authentication must be installed
+  (installModusOpsModules).
+inputs:
+  sharePointSite:
+    description: 'Site name to search for (Get-MgSite -Search).'
+    required: true
+  sharePointFile:
+    description: "Drive-relative destination path, e.g. 'Reports/workbook.xlsx'."
+    required: true
+  localFile:
+    description: 'Local source path.'
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Set SharePoint file
+      shell: pwsh
+      env:
+        SP_SITE: ${{ inputs.sharePointSite }}
+        SP_FILE: ${{ inputs.sharePointFile }}
+        SP_LOCAL: ${{ inputs.localFile }}
+      run: |
+        $VerbosePreference = 'Continue'
+        $ErrorActionPreference = 'Stop'
+
+        $siteSearch = $env:SP_SITE
+        $filePath   = $env:SP_FILE
+        $localFile  = $env:SP_LOCAL
+
+        if([string]::IsNullOrWhiteSpace($siteSearch)){ throw 'sharePointSite input is required.' }
+        if([string]::IsNullOrWhiteSpace($filePath)){ throw 'sharePointFile input is required.' }
+        if([string]::IsNullOrWhiteSpace($localFile)){ throw 'localFile input is required.' }
+        if(-not (Test-Path $localFile)){ throw "Local file not found: $localFile" }
+
+        if(-not (Get-MgContext -ErrorAction SilentlyContinue)){
+            throw 'No active Microsoft Graph connection. Run the connectMicrosoftGraph action earlier in this job.'
+        }
+
+        Write-Verbose "Resolving SharePoint site '$siteSearch'"
+        $site = Get-MgSite -Search $siteSearch | Select-Object -First 1
+        if(-not $site){ throw "SharePoint site '$siteSearch' not found." }
+
+        $drive = Get-MgSiteDrive -SiteId $site.Id | Select-Object -First 1
+        if(-not $drive){ throw "No drive found on site '$siteSearch'." }
+
+        Write-Verbose "Uploading '$localFile' to '$filePath' on drive $($drive.Id)"
+        Invoke-MgGraphRequest -Method PUT `
+            -Uri "https://graph.microsoft.com/v1.0/drives/$($drive.Id)/root:/$($filePath):/content" `
+            -Body (Get-Content $localFile -AsByteStream -Raw) `
+            -ContentType 'application/octet-stream'
+
+        Write-Verbose 'Upload complete.'

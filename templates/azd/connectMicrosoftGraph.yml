@@ -1,0 +1,55 @@
+# Connects to Microsoft Graph (app-only) using a client-secret credential.
+#
+# Connect once, use across the job: the Graph connection persists into LATER STEPS of the SAME job
+# (cached on the shared agent) but NOT across jobs - each job is a fresh agent. This is the same
+# steps-vs-jobs boundary as the register/install vault, and it's intentional: a separate notification
+# or follow-on job is cleanly isolated. Put this step before the steps that do Graph work.
+#
+# Microsoft.Graph.Authentication must already be installed (via installModusOpsModules) - this template
+# does not install modules.
+parameters:
+  - name: clientId
+    type: string
+  - name: tenantId
+    type: string
+  # NAME of the (secret) pipeline variable holding the client secret. Mapped to env below so the secret
+  # is never expanded inline into the script body (and never written to the build log).
+  - name: clientSecretVariable
+    type: string
+    default: 'clientSecret'
+
+steps:
+  - task: PowerShell@2
+    displayName: 'Connect to Microsoft Graph'
+    env:
+      MG_CLIENT_SECRET: $(${{ parameters.clientSecretVariable }})
+    inputs:
+      targetType: 'inline'
+      pwsh: true
+      script: |
+        $VerbosePreference = 'Continue'
+        $ErrorActionPreference = 'Stop'
+
+        $clientId     = '${{ parameters.clientId }}'
+        $tenantId     = '${{ parameters.tenantId }}'
+        $clientSecret = $env:MG_CLIENT_SECRET
+
+        if([string]::IsNullOrWhiteSpace($clientId)){ throw 'clientId parameter is required.' }
+        if([string]::IsNullOrWhiteSpace($tenantId)){ throw 'tenantId parameter is required.' }
+        if([string]::IsNullOrWhiteSpace($clientSecret) -or $clientSecret -like '$(*)'){
+            throw "Client secret is empty. Pass the NAME of a secret variable via clientSecretVariable (default 'clientSecret')."
+        }
+
+        if(-not (Get-Command Connect-MgGraph -ErrorAction SilentlyContinue)){
+            Import-Module Microsoft.Graph.Authentication -ErrorAction SilentlyContinue
+        }
+        if(-not (Get-Command Connect-MgGraph -ErrorAction SilentlyContinue)){
+            throw 'Connect-MgGraph is not available. Install Microsoft.Graph.Authentication via installModusOpsModules first.'
+        }
+
+        $secureSecret = ConvertTo-SecureString $clientSecret -AsPlainText -Force
+        $credential   = [System.Management.Automation.PSCredential]::new($clientId, $secureSecret)
+
+        Write-Verbose "Connecting to Microsoft Graph (tenant $tenantId, clientId $clientId)"
+        Connect-MgGraph -TenantId $tenantId -ClientSecretCredential $credential -NoWelcome
+        Write-Verbose 'Connected to Microsoft Graph.'

@@ -39,25 +39,46 @@
       "platforms": ["azd", "gh"],
       "assets": { "azd": "azd.sendDiscordChannelMessage.yml", "gh": "gh.sendDiscordChannelMessage.zip" }
     },
+    "connectMicrosoftGraph": {
+      "category": "pipeline",
+      "kind": { "azd": "stepTemplate", "gh": "compositeAction" },
+      "description": "Connect to Microsoft Graph (app-only, client-secret). Connection persists across later steps of the SAME job (not across jobs); place before the steps doing Graph work. Requires Microsoft.Graph.Authentication (installModusOpsModules).",
+      "platforms": ["azd", "gh"],
+      "assets": { "azd": "azd.connectMicrosoftGraph.yml", "gh": "gh.connectMicrosoftGraph.zip" }
+    },
+    "getSharePointFile": {
+      "category": "pipeline",
+      "kind": { "azd": "stepTemplate", "gh": "compositeAction" },
+      "description": "Download a file from a SharePoint document library via Microsoft Graph. Expects an existing Graph connection - run connectMicrosoftGraph earlier in the same job. No credential params. Requires Microsoft.Graph.Authentication.",
+      "platforms": ["azd", "gh"],
+      "assets": { "azd": "azd.getSharePointFile.yml", "gh": "gh.getSharePointFile.zip" }
+    },
+    "setSharePointFile": {
+      "category": "pipeline",
+      "kind": { "azd": "stepTemplate", "gh": "compositeAction" },
+      "description": "Upload a local file to a SharePoint document library via Microsoft Graph. Expects an existing Graph connection - run connectMicrosoftGraph earlier in the same job. No credential params. Requires Microsoft.Graph.Authentication.",
+      "platforms": ["azd", "gh"],
+      "assets": { "azd": "azd.setSharePointFile.yml", "gh": "gh.setSharePointFile.zip" }
+    },
     "templatesRepoPRValidation": {
       "category": "repoScaffold",
       "repoType": "templatesRepo",
-      "kind": { "gh": "workflow" },
-      "description": "[templates repo] PR-gate workflow: lints azd + gh templates (structure / parameter / gh-action / secret) and blocks merge on gating issues.",
-      "platforms": ["gh"],
-      "assets": { "gh": "gh.workflow.templatesRepoPRValidation.yml" },
-      "source": { "gh": ".github/workflows/prValidation.yml" },
-      "dest": { "gh": ".github/workflows/prValidation.yml" }
+      "kind": { "gh": "workflow", "azd": "pipeline" },
+      "description": "[templates repo] PR-gate that lints azd + gh templates (structure / parameter / gh-action / secret) and blocks merge. gh = Actions workflow; azd = pipeline wired as a branch-policy build validation (PR comment via the PR-threads REST API).",
+      "platforms": ["gh", "azd"],
+      "assets": { "gh": "gh.workflow.templatesRepoPRValidation.yml", "azd": "azd.pipeline.templatesRepoPRValidation.yml" },
+      "source": { "gh": ".github/workflows/prValidation.yml", "azd": "repoScaffold/azd/prValidation.yml" },
+      "dest": { "gh": ".github/workflows/prValidation.yml", "azd": ".azuredevops/prValidation.yml" }
     },
     "templatesRepoRelease": {
       "category": "repoScaffold",
       "repoType": "templatesRepo",
-      "kind": { "gh": "workflow" },
-      "description": "[templates repo] Release workflow: on merge to main cuts the next rolling-integer tag (vN) and attaches the full template set + checksums.txt + manifest.json.",
-      "platforms": ["gh"],
-      "assets": { "gh": "gh.workflow.templatesRepoRelease.yml" },
-      "source": { "gh": ".github/workflows/release.yml" },
-      "dest": { "gh": ".github/workflows/release.yml" }
+      "kind": { "gh": "workflow", "azd": "pipeline" },
+      "description": "[templates repo] Release furniture - cuts the next rolling-integer tag (vN) on merge to main. gh ALSO attaches the full template set + checksums.txt + manifest.json as release assets; azd cuts the tag only (Azure DevOps has no downloadable release assets - the tag is the pin consumers reference via a repository: resource).",
+      "platforms": ["gh", "azd"],
+      "assets": { "gh": "gh.workflow.templatesRepoRelease.yml", "azd": "azd.pipeline.templatesRepoRelease.yml" },
+      "source": { "gh": ".github/workflows/release.yml", "azd": "repoScaffold/azd/release.yml" },
+      "dest": { "gh": ".github/workflows/release.yml", "azd": ".azuredevops/release.yml" }
     },
     "templatesRepoPullRequest": {
       "category": "repoScaffold",
@@ -117,9 +138,26 @@
     },
     "workflowSet": {
       "type": "selector",
-      "description": "All repoScaffold workflow furniture for the platform (derived - auto-includes new workflow templates).",
+      "description": "All repoScaffold workflow furniture for gh (derived - auto-includes new gh workflow templates).",
       "platforms": ["gh"],
       "select": { "category": "repoScaffold", "kind": "workflow" }
+    },
+    "azdWorkflowSet": {
+      "type": "selector",
+      "description": "All repoScaffold pipeline furniture for azd (derived - auto-includes new azd CI pipelines). The azd analog of workflowSet (kind 'pipeline' rather than 'workflow').",
+      "platforms": ["azd"],
+      "select": { "category": "repoScaffold", "kind": "pipeline" }
+    },
+    "azdTemplateLibrary": {
+      "type": "archetype",
+      "description": "An Azure DevOps modusOps templates-library repo: the template-linter PR-validation pipeline (wire as a branch-policy build validation) + the rolling-integer tag pipeline + a branch-policy provision step. azd tags rather than attaching assets (the tag is the pin consumers reference via a repository: resource).",
+      "platforms": ["azd"],
+      "steps": [
+        { "type": "file", "template": "templatesRepoPRValidation" },
+        { "type": "file", "template": "templatesRepoRelease" },
+        { "type": "provision", "id": "buildValidation", "cmdlet": "Add-MOAzureDevOpsModusBuildValidation",
+          "with": { "RepositoryName": "{repo}", "BuildDefinitionId": "{buildId}" } }
+      ]
     },
     "azdOpsRepo": {
       "type": "archetype",
