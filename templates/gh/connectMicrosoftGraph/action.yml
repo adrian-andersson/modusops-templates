@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-action.json
+name: 'Connect to Microsoft Graph'
+description: >-
+  Connects to Microsoft Graph (app-only) with a client-secret credential. The connection persists into
+  later steps of the SAME job (cached on the shared runner) but not across jobs - the same steps-vs-jobs
+  boundary as the register/install vault, and intentional. Put this step before the steps that do Graph
+  work. Microsoft.Graph.Authentication must already be installed (installModusOpsModules).
+inputs:
+  clientId:
+    description: 'App registration (client) ID.'
+    required: true
+  tenantId:
+    description: 'Entra tenant ID.'
+    required: true
+  clientSecret:
+    description: 'App registration client secret. Pass via an input from secrets.* - never hardcode.'
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Connect to Microsoft Graph
+      shell: pwsh
+      env:
+        MG_CLIENT_ID: ${{ inputs.clientId }}
+        MG_TENANT_ID: ${{ inputs.tenantId }}
+        MG_CLIENT_SECRET: ${{ inputs.clientSecret }}
+      run: |
+        $VerbosePreference = 'Continue'
+        $ErrorActionPreference = 'Stop'
+
+        $clientId     = $env:MG_CLIENT_ID
+        $tenantId     = $env:MG_TENANT_ID
+        $clientSecret = $env:MG_CLIENT_SECRET
+
+        if([string]::IsNullOrWhiteSpace($clientId)){ throw 'clientId input is required.' }
+        if([string]::IsNullOrWhiteSpace($tenantId)){ throw 'tenantId input is required.' }
+        if([string]::IsNullOrWhiteSpace($clientSecret)){ throw 'clientSecret input is required.' }
+
+        if(-not (Get-Command Connect-MgGraph -ErrorAction SilentlyContinue)){
+            Import-Module Microsoft.Graph.Authentication -ErrorAction SilentlyContinue
+        }
+        if(-not (Get-Command Connect-MgGraph -ErrorAction SilentlyContinue)){
+            throw 'Connect-MgGraph is not available. Install Microsoft.Graph.Authentication via installModusOpsModules first.'
+        }
+
+        $secureSecret = ConvertTo-SecureString $clientSecret -AsPlainText -Force
+        $credential   = [System.Management.Automation.PSCredential]::new($clientId, $secureSecret)
+
+        Write-Verbose "Connecting to Microsoft Graph (tenant $tenantId, clientId $clientId)"
+        Connect-MgGraph -TenantId $tenantId -ClientSecretCredential $credential -NoWelcome
+        Write-Verbose 'Connected to Microsoft Graph.'

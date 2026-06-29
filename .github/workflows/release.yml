@@ -117,27 +117,34 @@ jobs:
           # --- repoScaffold: workflows / markdown / issue forms shipped from .github (dogfooded) ---
           # Manifest-driven (not globbed): each repoScaffold entry names its own source path + asset name.
           # File source -> single-file asset (anchor = file SHA256). Directory source -> zip (anchor = tree hash).
+          # Each repoScaffold entry can target multiple platforms (gh workflows, azd pipelines); stage
+          # every platform it declares an asset+source for. The library repo lives on GitHub and ships
+          # ALL assets (incl. azd-targeted ones) from this one GitHub Release; an azd consumer vendors
+          # the azd asset into its own repo via the same tooling.
           $repoScaffoldCount = 0
           if(Test-Path './manifest.json'){
               $mf = Get-Content -LiteralPath './manifest.json' -Raw | ConvertFrom-Json
               foreach($prop in $mf.templates.PSObject.Properties){
                   $t = $prop.Value
                   if($t.category -ne 'repoScaffold'){ continue }
-                  $asset = $t.assets.gh
-                  $src   = $t.source.gh
-                  if(-not $asset -or -not $src){ throw "repoScaffold '$($prop.Name)' is missing a gh asset/source in the manifest." }
-                  if(-not (Test-Path -LiteralPath $src)){ throw "repoScaffold '$($prop.Name)' source '$src' does not exist." }
-                  if(Test-Path -LiteralPath $src -PathType Leaf){
-                      Copy-Item -LiteralPath $src -Destination (Join-Path 'dist' $asset)
-                      $hash = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash.ToLower()
-                      $checksums.Add("$hash  $asset")
-                  }else{
-                      Compress-Archive -Path (Join-Path $src '*') -DestinationPath (Join-Path 'dist' $asset) -Force
-                      $tree = Get-TreeHash -Root $src
-                      $checksums.Add("$tree  $asset")
+                  foreach($plat in @('gh','azd')){
+                      $asset = $t.assets.$plat
+                      $src   = $t.source.$plat
+                      if(-not $asset -and -not $src){ continue }   # this entry doesn't target $plat
+                      if(-not $asset -or -not $src){ throw "repoScaffold '$($prop.Name)' ($plat) is missing an asset or source in the manifest." }
+                      if(-not (Test-Path -LiteralPath $src)){ throw "repoScaffold '$($prop.Name)' source '$src' does not exist." }
+                      if(Test-Path -LiteralPath $src -PathType Leaf){
+                          Copy-Item -LiteralPath $src -Destination (Join-Path 'dist' $asset)
+                          $hash = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash.ToLower()
+                          $checksums.Add("$hash  $asset")
+                      }else{
+                          Compress-Archive -Path (Join-Path $src '*') -DestinationPath (Join-Path 'dist' $asset) -Force
+                          $tree = Get-TreeHash -Root $src
+                          $checksums.Add("$tree  $asset")
+                      }
+                      Write-Verbose "Staged repoScaffold '$($prop.Name)' [$plat] -> $asset (from $src)"
+                      $repoScaffoldCount++
                   }
-                  Write-Verbose "Staged repoScaffold '$($prop.Name)' -> $asset (from $src)"
-                  $repoScaffoldCount++
               }
           }
 
